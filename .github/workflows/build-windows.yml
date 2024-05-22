@@ -1,6 +1,6 @@
 name: Builds
 
-on: [push, pull_request]
+on: [push]
 
 jobs:
   Build:
@@ -28,11 +28,7 @@ jobs:
     - name: Build the codebase (64-bit)
       run: |
         msbuild SpecialK.sln -p:Configuration="Release" -p:Platform="x64" -m
-
-    - name: Build the codebase (32-bit)
-      run: |
-        msbuild SpecialK.sln -p:Configuration="Release" -p:Platform="Win32" -m
-
+        
     - name: Prepare environment variables for the artifact name
       run: |
         $Version = (Get-Item "$HOME\Documents\My Mods\SpecialK\SpecialK*.dll").VersionInfo.ProductVersion | Select-Object -First 1
