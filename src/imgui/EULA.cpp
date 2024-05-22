@@ -143,7 +143,7 @@ SK_ImGui_DrawEULA (LPVOID reserved)
     //  goto END_POPUP;
     //}
 
-    bool pirate = false;
+    bool pirate = false; // build
 
 
     ImGui::BeginGroup ();
