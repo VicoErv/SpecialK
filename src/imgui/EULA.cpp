@@ -112,7 +112,7 @@ SK_ImGui_DrawEULA (LPVOID reserved)
   static std::wstring
               plugin        = SK_GetPluginName ();
   static char szTitle [256] = { };
-  static bool open          = true;
+  static bool open          = false;
 
   if (*szTitle == '\0')
     sprintf (szTitle, "%ws Software License Agreement", plugin.c_str ());
