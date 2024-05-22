@@ -143,8 +143,7 @@ SK_ImGui_DrawEULA (LPVOID reserved)
     //  goto END_POPUP;
     //}
 
-    bool pirate = ( SK_SteamAPI_AppID    () != 0 &&
-                    SK_Steam_PiratesAhoy () != 0x0 );
+    bool pirate = false;
 
 
     ImGui::BeginGroup ();
