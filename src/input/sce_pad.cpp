@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -315,6 +315,8 @@ SK_ScePadReadState (SK_ScePadHandle handle, SK_ScePadData* iData)
         WriteULong64Release (&ullFirstChordFrame, ullThisFrame);
       }
 
+// This is unneeded now that Special K can poll gamepad input using HID
+#if 0
       static constexpr auto ullFrameGracePeriod = 20ULL;
 
       if ( _JustReleased ( iData->buttonMask, last_result [handle].
@@ -347,6 +349,7 @@ SK_ScePadReadState (SK_ScePadHandle handle, SK_ScePadData* iData)
           WriteULong64Release (&ullLastChordFrame, ullThisFrame);
         }
       }
+#endif
     }
 
 
@@ -464,7 +467,7 @@ SK_ScePadReadState (SK_ScePadHandle handle, SK_ScePadData* iData)
     last_result [handle] =
       std::make_pair (
          result, iData != nullptr ?
-                *iData            : SK_ScePadData { 0 }
+                *iData            : SK_ScePadData { }
       );
 
     if (result == SK_SCE_ERROR_OK)

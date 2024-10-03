@@ -74,6 +74,7 @@ SK_RenderAPI                 SK::ControlPanel::render_api;
 DWORD                        SK::ControlPanel::current_time = 0;
 uint64_t                     SK::ControlPanel::current_tick;// Perf Counter
 SK::ControlPanel::font_cfg_s SK::ControlPanel::font;
+SK::ControlPanel::window_s   SK::ControlPanel::imgui_window = { };
 
 DWORD
 SK_GetCurrentMS (void) noexcept
@@ -647,19 +648,16 @@ SK_ImGui_IsItemClicked (void)
   if (ImGui::IsItemClicked ())
     return true;
 
-  auto& io =
-    ImGui::GetIO ();
-
   static auto lastFrame  = SK_GetFramesDrawn ();
   static auto lastActive =
-    io.NavInputs [ImGuiNavInput_Activate];
+    ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDuration;
 
-  bool activated =         lastActive     > 0.0f &&
-                           lastActive    <= 0.4f &&
-   io.NavInputs [ImGuiNavInput_Activate] == 0.0f;
+  bool activated = lastActive  > 0.0f &&
+                   lastActive <= 0.4f &&
+   (ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDuration == 0.0f);
 
   if (std::exchange (lastFrame, SK_GetFramesDrawn ()) != SK_GetFramesDrawn ())
-                     lastActive = io.NavInputs [ImGuiNavInput_Activate];
+                     lastActive = ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDuration;
 
   if (ImGui::IsItemHovered ())
   {
@@ -681,13 +679,15 @@ SK_ImGui_IsItemRightClicked (void)
 
   if (ImGui::IsItemHovered ())
   {
-    auto& io =
-      ImGui::GetIO ();
-
     // Activate button held for >= .4 seconds -> right-click
-    if (io.NavInputs [ImGuiNavInput_Activate] > 0.4f)
-    {   io.NavInputs [ImGuiNavInput_Activate] = 0.0f;
-      ImGui::SetHoveredID (0);
+    if (ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDuration > 0.4f &&
+        ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDuration < 5.0f)
+    {
+      ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDuration     = 5.0f;
+      ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDurationPrev = 0.0f;
+
+      ImGui::ClearActiveID ( );
+      ImGui::SetHoveredID  (0);
       return true;
     }
   }
@@ -704,6 +704,11 @@ SK_ImGui_IsWindowRightClicked (const ImGuiIO& io)
       return true;
 
     if (ImGui::IsWindowFocused () && io.MouseDoubleClicked [4])
+    {
+      return true;
+    }
+
+    if (ImGui::IsWindowFocused () && ImGui::GetKeyData (ImGuiKey_GamepadFaceDown)->DownDuration > 0.4f)
     {
       return true;
     }
@@ -3684,23 +3689,64 @@ SK_ImGui_ControlPanel (void)
             ImGui::Checkbox ( "Keep Full-Range HDR Screenshots",
                                 &config.screenshots.png_compress );
 
-        // Show AVIF options in 64-bit builds
-        if (config.screenshots.png_compress && SK_GetBitness () == SK_Bitness::SixtyFourBit)
+                int clipboard_selection =
+          config.screenshots.copy_to_clipboard   ?
+          config.screenshots.allow_hdr_clipboard ? 1 : 2 : 0;
+
+        if (ImGui::Combo ( "Clipboard Format", &clipboard_selection,
+                           "None (Do Not Copy)\0"
+                           "Lossless HDR\0"
+                           "Tone-mapped SDR\0\0" ))
+        {
+          hdr_changed = true;
+
+          if (clipboard_selection > 0)
+          {
+            config.screenshots.allow_hdr_clipboard =
+              (clipboard_selection == 1);
+          }
+          config.screenshots.copy_to_clipboard =
+            (clipboard_selection > 0);
+        }
+
+        if (ImGui::IsItemHovered ())
+        {
+          ImGui::BeginTooltip    ();
+          ImGui::TextUnformatted ("Lossless HDR copies are compatible with SKIV and Discord");
+          ImGui::Separator       ();
+          ImGui::BulletText      ("Instead of tone mapping HDR->SDR, clipboard will contain a real HDR image.");
+          ImGui::BulletText      ("HDR copies have limited compatibility, and cannot be pasted to MSPaint, etc.");
+          ImGui::EndTooltip      ();
+        }
+
+        if (config.screenshots.png_compress)
         {
           static bool bFetchingAVIF = false;
+          static int  iFetchingJXL  = 0;
+
+          static constexpr int SK_CODEC_JXL  = 3;
+          static constexpr int SK_CODEC_AVIF = 2;
+          static constexpr int SK_CODEC_PNG  = 1;
 
           int selection =
-            ( config.screenshots.use_avif ?
-                                        1 : 0 );
+            ( config.screenshots.use_jxl     ? SK_CODEC_JXL  :
+              config.screenshots.use_avif    ? SK_CODEC_AVIF :
+              config.screenshots.use_hdr_png ? SK_CODEC_PNG  :
+                                               0 );
 
           if (
             ImGui::Combo ( "HDR File Format", &selection,
-                           "JPEG-XR (.jxr)\0"
-                           "AVIF\t\t(.avif)\0\0" )
+                           "JPEG XR (.jxr)\0"
+                           "PNG\t\t(.png)\0"
+                           "AVIF\t\t(.avif)\0"
+                           "JPEG XL (.jxl)\0\0" )
              )
           {
-            if (selection == 1)
+            if (selection == SK_CODEC_AVIF)
             {
+              config.screenshots.use_hdr_png = false;
+              config.screenshots.use_jxl     = false;
+
               if (! bFetchingAVIF)
               {
                 static std::filesystem::path avif_dll =
@@ -3715,9 +3761,9 @@ SK_ImGui_ControlPanel (void)
 
                   SK_Network_EnqueueDownload (
                        sk_download_request_s (
-                         avif_dll.wstring (),
-                           R"(https://sk-data.special-k.info/addon/ImageCodecs/)"
-                                     R"(libavif/libavif_x64.dll)",
+                         avif_dll.wstring (),                           
+                           SK_RunLHIfBitness ( 64, R"(https://sk-data.special-k.info/addon/ImageCodecs/libavif/libavif_x64.dll)",
+                                                   R"(https://sk-data.special-k.info/addon/ImageCodecs/libavif/libavif_x86.dll)" ),
                   []( const std::vector <uint8_t>&&,
                       const std::wstring_view )
                    -> bool
@@ -3738,8 +3784,222 @@ SK_ImGui_ControlPanel (void)
                 }
               }
             }
+
+            else if (selection == SK_CODEC_JXL)
+            {
+              config.screenshots.use_hdr_png = false;
+              config.screenshots.use_avif    = false;
+
+              if (! iFetchingJXL)
+              {
+                static std::filesystem::path jxl_dll =
+                       std::filesystem::path (SK_GetPlugInDirectory (SK_PlugIn_Type::ThirdParty)) /
+                    SK_RunLHIfBitness ( 64, LR"(Image Codecs\libjxl\x64\jxl.dll)",
+                                            LR"(Image Codecs\libjxl\x86\jxl.dll)" );
+
+                static std::filesystem::path jxl_threads_dll =
+                       std::filesystem::path (SK_GetPlugInDirectory (SK_PlugIn_Type::ThirdParty)) /
+                    SK_RunLHIfBitness ( 64, LR"(Image Codecs\libjxl\x64\jxl_threads.dll)",
+                                            LR"(Image Codecs\libjxl\x86\jxl_threads.dll)" );
+
+                static std::filesystem::path jxl_cms_dll =
+                       std::filesystem::path (SK_GetPlugInDirectory (SK_PlugIn_Type::ThirdParty)) /
+                    SK_RunLHIfBitness ( 64, LR"(Image Codecs\libjxl\x64\jxl_cms.dll)",
+                                            LR"(Image Codecs\libjxl\x86\jxl_cms.dll)" );
+
+                static std::filesystem::path brotlicommon_dll =
+                       std::filesystem::path (SK_GetPlugInDirectory (SK_PlugIn_Type::ThirdParty)) /
+                    SK_RunLHIfBitness ( 64, LR"(Image Codecs\libjxl\x64\brotlicommon.dll)",
+                                            LR"(Image Codecs\libjxl\x86\brotlicommon.dll)" );
+
+                static std::filesystem::path brotlidec_dll =
+                       std::filesystem::path (SK_GetPlugInDirectory (SK_PlugIn_Type::ThirdParty)) /
+                    SK_RunLHIfBitness ( 64, LR"(Image Codecs\libjxl\x64\brotlidec.dll)",
+                                            LR"(Image Codecs\libjxl\x86\brotlidec.dll)" );
+
+                static std::filesystem::path brotlienc_dll =
+                       std::filesystem::path (SK_GetPlugInDirectory (SK_PlugIn_Type::ThirdParty)) /
+                    SK_RunLHIfBitness ( 64, LR"(Image Codecs\libjxl\x64\brotlienc.dll)",
+                                            LR"(Image Codecs\libjxl\x86\brotlienc.dll)" );
+
+                static std::error_code                           ec;
+                if (! (std::filesystem::exists (jxl_dll,         ec) &&
+                       std::filesystem::exists (jxl_cms_dll,     ec) &&
+                       std::filesystem::exists (jxl_threads_dll, ec) &&
+                       std::filesystem::exists (brotlicommon_dll,ec) &&
+                       std::filesystem::exists (brotlidec_dll,   ec) &&
+                       std::filesystem::exists (brotlienc_dll,   ec)))
+                {
+                  iFetchingJXL += (! std::filesystem::exists (jxl_dll,         ec)) ? 1 : 0;
+                  iFetchingJXL += (! std::filesystem::exists (jxl_cms_dll,     ec)) ? 1 : 0;
+                  iFetchingJXL += (! std::filesystem::exists (jxl_threads_dll, ec)) ? 1 : 0;
+                  iFetchingJXL += (! std::filesystem::exists (brotlicommon_dll,ec)) ? 1 : 0;
+                  iFetchingJXL += (! std::filesystem::exists (brotlidec_dll,   ec)) ? 1 : 0;
+                  iFetchingJXL += (! std::filesystem::exists (brotlienc_dll,   ec)) ? 1 : 0;
+
+                  if (! std::filesystem::exists (jxl_dll, ec))
+                  SK_Network_EnqueueDownload (
+                       sk_download_request_s (
+                         jxl_dll.wstring (),
+                           R"(https://sk-data.special-k.info/addon/ImageCodecs/)"
+#ifdef _M_X64
+                           R"(libjxl/x64/jxl.dll)",
+#else
+                           R"(libjxl/x86/jxl.dll)",
+#endif
+                  []( const std::vector <uint8_t>&&,
+                      const std::wstring_view )
+                   -> bool
+                      {
+                        if (--iFetchingJXL == 0)
+                        {
+                          config.screenshots.use_jxl             = true;
+                          config.screenshots.compression_quality = 99;
+                        }
+                  
+                        return false;
+                      }
+                    ), true
+                  );
+
+                  if (! std::filesystem::exists (jxl_threads_dll, ec))
+                  SK_Network_EnqueueDownload (
+                       sk_download_request_s (
+                         jxl_threads_dll.wstring (),
+                           R"(https://sk-data.special-k.info/addon/ImageCodecs/)"
+#ifdef _M_X64
+                           R"(libjxl/x64/jxl_threads.dll)",
+#else
+                           R"(libjxl/x86/jxl_threads.dll)",
+#endif
+                  []( const std::vector <uint8_t>&&,
+                      const std::wstring_view )
+                   -> bool
+                      {
+                        if (--iFetchingJXL == 0)
+                        {
+                          config.screenshots.use_jxl             = true;
+                          config.screenshots.compression_quality = 99;
+                        }
+
+                        return false;
+                      }
+                    ), true
+                  );
+
+                  if (! std::filesystem::exists (jxl_cms_dll, ec))
+                  SK_Network_EnqueueDownload (
+                       sk_download_request_s (
+                         jxl_cms_dll.wstring (),
+                           R"(https://sk-data.special-k.info/addon/ImageCodecs/)"
+#ifdef _M_X64
+                           R"(libjxl/x64/jxl_cms.dll)",
+#else
+                           R"(libjxl/x86/jxl_cms.dll)",
+#endif
+                  []( const std::vector <uint8_t>&&,
+                      const std::wstring_view )
+                   -> bool
+                      {
+                        if (--iFetchingJXL == 0)
+                        {
+                          config.screenshots.use_jxl             = true;
+                          config.screenshots.compression_quality = 99;
+                        }
+
+                        return false;
+                      }
+                    ), true
+                  );
+
+                  if (! std::filesystem::exists (brotlicommon_dll, ec))
+                  SK_Network_EnqueueDownload (
+                       sk_download_request_s (
+                         brotlicommon_dll.wstring (),
+                           R"(https://sk-data.special-k.info/addon/ImageCodecs/)"
+#ifdef _M_X64
+                           R"(libjxl/x64/brotlicommon.dll)",
+#else
+                           R"(libjxl/x86/brotlicommon.dll)",
+#endif
+                  []( const std::vector <uint8_t>&&,
+                      const std::wstring_view )
+                   -> bool
+                      {
+                        if (--iFetchingJXL == 0)
+                        {
+                          config.screenshots.use_jxl             = true;
+                          config.screenshots.compression_quality = 99;
+                        }
+
+                        return false;
+                      }
+                    ), true
+                  );
+
+                  if (! std::filesystem::exists (brotlienc_dll, ec))
+                  SK_Network_EnqueueDownload (
+                       sk_download_request_s (
+                         brotlienc_dll.wstring (),
+                           R"(https://sk-data.special-k.info/addon/ImageCodecs/)"
+#ifdef _M_X64
+                           R"(libjxl/x64/brotlienc.dll)",
+#else
+                           R"(libjxl/x86/brotlienc.dll)",
+#endif
+                  []( const std::vector <uint8_t>&&,
+                      const std::wstring_view )
+                   -> bool
+                      {
+                        if (--iFetchingJXL == 0)
+                        {
+                          config.screenshots.use_jxl             = true;
+                          config.screenshots.compression_quality = 99;
+                        }
+
+                        return false;
+                      }
+                    ), true
+                  );
+
+                  if (! std::filesystem::exists (brotlidec_dll, ec))
+                  SK_Network_EnqueueDownload (
+                       sk_download_request_s (
+                         brotlidec_dll.wstring (),
+                           R"(https://sk-data.special-k.info/addon/ImageCodecs/)"
+#ifdef _M_X64
+                           R"(libjxl/x64/brotlidec.dll)",
+#else
+                           R"(libjxl/x86/brotlidec.dll)",
+#endif
+                  []( const std::vector <uint8_t>&&,
+                      const std::wstring_view )
+                   -> bool
+                      {
+                        if (--iFetchingJXL == 0)
+                        {
+                          config.screenshots.use_jxl             = true;
+                          config.screenshots.compression_quality = 99;
+                        }
+
+                        return false;
+                      }
+                    ), true
+                  );
+                }
+                else
+                {
+                  config.screenshots.use_jxl             = true;
+                  config.screenshots.compression_quality = 99;
+                }
+              }
+            }
             else
             {
+              config.screenshots.use_hdr_png =
+                (selection == 1);
+
+              config.screenshots.use_jxl             = false;
               config.screenshots.use_avif            = false;
               config.screenshots.compression_quality = 90;
             }
@@ -3748,6 +4008,11 @@ SK_ImGui_ControlPanel (void)
           if (bFetchingAVIF)
           {
             ImGui::TextColored (ImVec4 (.1f,.9f,.1f,1.f), "Downloading AVIF Plug-In...");
+          }
+
+          if (iFetchingJXL != 0)
+          {
+            ImGui::TextColored (ImVec4 (.1f,.9f,.1f,1.f), "Downloading JPEG XL Plug-In...");
           }
         }
 
@@ -3816,11 +4081,14 @@ SK_ImGui_ControlPanel (void)
 
           bool changed = false;
 
-          changed |=
-            ImGui::SliderInt ("Compression Quality", &config.screenshots.compression_quality, 80, 100, szCompressionQualityFormat);
+          if (! config.screenshots.use_hdr_png)
+          {
+            changed |=
+              ImGui::SliderInt ("Compression Quality", &config.screenshots.compression_quality, 80, 100, szCompressionQualityFormat);
 
-          if (ImGui::IsItemHovered ())
-            ImGui::SetTooltip ("You can manually enter values < 80 using ctrl+click, but the results will be terrible.");
+            if (ImGui::IsItemHovered ())
+              ImGui::SetTooltip ("You can manually enter values < 80 using ctrl+click, but the results will be terrible.");
+          }
 
           if (config.screenshots.use_avif)
           {
@@ -3845,6 +4113,21 @@ SK_ImGui_ControlPanel (void)
 
           ImGui::TreePop ();
         }
+
+#if 0
+        if (config.screenshots.png_compress)
+        {
+          hdr_changed |=
+            ImGui::Checkbox ("HDR Screenshot Compatibility Mode", &config.screenshots.compatibility_mode);
+
+          if (ImGui::IsItemHovered ())
+          {
+            ImGui::SetTooltip ("Disables advanced compression features and formats not supported by all software.");
+          }
+        }
+#else
+        config.screenshots.compatibility_mode = true;
+#endif
 
         if ( rb.screenshot_mgr->getRepoStats ().files > 0 )
         {
@@ -3913,7 +4196,7 @@ SK_ImGui_ControlPanel (void)
           if (    same_line)
             ImGui::SameLine ();
 
-          ImGui::PushStyleColor (ImGuiCol_Text, (ImVec4&&)ImColor::HSV (.3f, .8f, .9f));
+          ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (.3f, .8f, .9f).Value);
           ImGui::BulletText     ("Game Restart May Be Required");
           ImGui::PopStyleColor  ();
         }
@@ -4777,6 +5060,9 @@ SK_ImGui_ControlPanel (void)
                                           ImGuiWindowFlags_MenuBar )
   );
 
+  SK::ControlPanel::imgui_window.id =
+    ImGui::GetCurrentWindow ()->ID;
+
   style = orig;
 
   if (open)
@@ -5064,12 +5350,12 @@ SK_ImGui_ControlPanel (void)
 
         if (rb.gsync_state.active)
         {
-          auto& nvapi_display =
-            rb.displays [rb.active_display].nvapi;
+          auto& stats =
+            rb.displays [rb.active_display].statistics;
 
           float fVBlankHz =
-            nvapi_display.vblank_counter.getVBlankHz (
-                      SK::ControlPanel::current_time );
+            stats.vblank_counter.getVBlankHz (
+                    SK_QueryPerf ().QuadPart );
 
           // Is it really "active" if we can't calculate the rate?
           if (fVBlankHz == 0.0f)
@@ -6804,6 +7090,7 @@ SK_ImGui_ControlPanel (void)
         &config.screenshots.sk_osd_insertion_keybind,
         &config.screenshots.no_3rd_party_keybind,
         &config.screenshots.clipboard_only_keybind,
+        &config.screenshots.snipping_keybind
       };
 
     // Add a HUD Free Screenshot keybind option if HUD shaders are present
@@ -6888,6 +7175,9 @@ SK_ImGui_ControlPanel (void)
   SK_ImGui_LastWindowCenter.x = ( pos.x + size.x / 2.0f );
   SK_ImGui_LastWindowCenter.y = ( pos.y + size.y / 2.0f );
   }
+
+  SK::ControlPanel::imgui_window.hovered =
+    ImGui::IsWindowHovered ();
 
   ImGui::End           ();
   ImGui::PopStyleColor ();
@@ -8163,6 +8453,72 @@ extern IMGUI_API    void ImGui_ImplDX9_RenderDrawData  (ImDrawData* draw_data);
 extern IMGUI_API    void ImGui_ImplDX11_RenderDrawData (ImDrawData* draw_data);
 extern/*IMGUI_API*/ void ImGui_ImplDX12_RenderDrawData (ImDrawData* draw_data, ID3D12GraphicsCommandList* ctx);
 
+#define SK_IMGUI_SELECT_FLAG_NONE           0x0
+#define SK_IMGUI_SELECT_FLAG_SINGLE_CLICK   0x1
+#define SK_IMGUI_SELECT_FLAG_ALLOW_INVERTED 0x2
+#define SK_IMGUI_SELECT_FLAG_FILLED         0x4
+#define SK_IMGUI_SELECT_FLAG_DEFAULT        SK_IMGUI_SELECT_FLAG_FILLED
+
+bool
+SK_ImGui_SelectionRect ( ImRect*          selection,
+                         ImRect           allowed,
+                         ImGuiMouseButton mouse_button,
+                         int              flags = SK_IMGUI_SELECT_FLAG_DEFAULT )
+{
+  const bool single_click =
+    (flags & SK_IMGUI_SELECT_FLAG_SINGLE_CLICK);
+
+  const bool min_is_zero =
+    (selection->Min.x == selection->Min.y && selection->Min.y == 0.0f);
+
+  // Update start position on click
+  if ((ImGui::IsMouseClicked (mouse_button) && (! single_click)) ||
+                                  (min_is_zero && single_click))
+    selection->Min = ImGui::GetMousePos ();
+
+  // Update end position while being held down
+  if (ImGui::IsMouseDown (mouse_button) || single_click)
+    selection->Max = ImGui::GetMousePos ();
+
+  // Keep the selection within the allowed rectangle
+  selection->ClipWithFull (allowed);
+
+  static const auto
+    inset = ImVec2 (0.0f, 0.0f);
+
+  // Draw the selection rectangle
+  if (ImGui::IsMouseDown (mouse_button) || single_click)
+  {
+    ImDrawList* draw_list =
+      ImGui::GetForegroundDrawList ();
+
+      draw_list->AddRect       (selection->Min-inset, selection->Max+inset, ImGui::GetColorU32 (IM_COL32(0,130,216,255))); // Border
+
+    if (flags & SK_IMGUI_SELECT_FLAG_FILLED)
+      draw_list->AddRectFilled (selection->Min,       selection->Max,       ImGui::GetColorU32 (IM_COL32(0,130,216,50)));  // Background
+  }
+
+  const bool complete =
+    (single_click && ImGui::IsMouseClicked  (mouse_button)) ||
+                     ImGui::IsMouseReleased (mouse_button);
+
+  const bool allow_inversion =
+    (flags & SK_IMGUI_SELECT_FLAG_ALLOW_INVERTED);
+
+  if (complete)
+  {
+    if (! allow_inversion)
+    {
+      if (selection->Min.x > selection->Max.x) std::swap (selection->Min.x, selection->Max.x);
+      if (selection->Min.y > selection->Max.y) std::swap (selection->Min.y, selection->Max.y);
+    }
+  }
+
+  return
+    complete;
+}
+
+
 //
 // Hook this to override Special K's GUI
 //
@@ -8200,11 +8556,91 @@ SK_ImGui_DrawFrame ( _Unreferenced_parameter_ DWORD  dwFlags,
     ImGui::NewFrame ();
   }
 
-  const SK_RenderBackend& rb =
+  SK_RenderBackend& rb =
     SK_GetCurrentRenderBackend ();
 
   // Popup Windows, actually
   SK_Platform_DrawOSD ();
+
+
+  auto& screenshot_mgr =
+    rb.screenshot_mgr.get ();
+
+  static volatile ULONG64  queued_snipped_shot = ULONG64_MAX;
+  if (ReadULong64Acquire (&queued_snipped_shot) == SK_GetFramesDrawn ())
+  {
+    screenshot_mgr.setSnipState (SK_ScreenshotManager::SnippingInactive);
+
+    SK::SteamAPI::TakeScreenshot (
+      SK_ScreenshotStage::ClipboardOnly
+    );
+  }
+
+  const auto snip_state =
+    screenshot_mgr.getSnipState ();
+
+  if (snip_state == SK_ScreenshotManager::SnippingRequested)
+  {
+    screenshot_mgr.setSnipState (SK_ScreenshotManager::SnippingInactive);
+
+    // If setup snipping is successful...
+    //
+    screenshot_mgr.setSnipState (SK_ScreenshotManager::SnippingActive);
+  }
+
+  if (snip_state == SK_ScreenshotManager::SnippingActive)
+  {
+    static ImRect selection =
+      { 0.0f,0.0f, 0.0f,0.0f };
+
+    const ImRect window_dims =
+      { static_cast <float> (game_window.actual.window.left),
+        static_cast <float> (game_window.actual.window.top),
+        static_cast <float> (game_window.actual.window.right),
+        static_cast <float> (game_window.actual.window.bottom) };
+
+    ImDrawList* const draw_list =
+      ImGui::GetForegroundDrawList ();
+
+    draw_list->AddRectFilled ( window_dims.GetTL (),
+                               window_dims.GetBR (),
+                                 ImGui::GetColorU32 (IM_COL32 (25,25,25,50)) );
+
+    ///if (snip_state == SK_ScreenshotManager::SnippingRequested)
+    ///{
+    ///  selection.Min.x =
+    ///  selection.Min.y = 0.0f;
+    ///}
+
+    if (SK_ImGui_SelectionRect (&selection, window_dims, ImGuiMouseButton_Left))
+    {
+      const size_t
+        x      = static_cast <size_t> (std::max (selection.Min.x,        0.0f)),
+        y      = static_cast <size_t> (std::max (selection.Min.y,        0.0f)),
+        width  = static_cast <size_t> (std::max (selection.GetWidth  (), 0.0f)),
+        height = static_cast <size_t> (std::max (selection.GetHeight (), 0.0f));
+
+      selection.Min.x =
+      selection.Min.y = 0.0f;
+
+      screenshot_mgr.setSnipRect  ({ x,y, width,height });
+      screenshot_mgr.setSnipState (SK_ScreenshotManager::SnippingComplete);
+
+      unsigned int backbuffers = 2;
+
+      SK_ComQIPtr <IDXGISwapChain1>
+          pSwapChain (rb.swapchain);
+      if (pSwapChain.p != nullptr)
+      {
+        DXGI_SWAP_CHAIN_DESC  swapDesc = {};
+        pSwapChain->GetDesc (&swapDesc);
+
+        backbuffers = std::max (2U, swapDesc.BufferCount);
+      }
+      WriteULong64Release (&queued_snipped_shot, SK_GetFramesDrawn ()+backbuffers);
+    }
+  }
+
 
   if (rb.api == SK_RenderAPI::OpenGL)
   {
@@ -8281,10 +8717,54 @@ SK_ImGui_DrawFrame ( _Unreferenced_parameter_ DWORD  dwFlags,
   return 0;
 }
 
+void
+SK_ImGui_BackupAndRestoreCursorPos (void)
+{
+  static POINT
+    ptOriginalCursorPos = {};
+
+  POINT             ptCursorPos = {};
+  SK_GetCursorPos (&ptCursorPos);
+
+  GetWindowRect (game_window.hWnd,
+                &game_window.actual.window);
+
+  if (! SK_ImGui_Visible)
+  {
+    if (PtInRect (&game_window.actual.window, ptCursorPos))
+    {
+      ptOriginalCursorPos = ptCursorPos;
+    }
+
+    else
+    {
+      ptOriginalCursorPos.x = LONG_MAX;
+      ptOriginalCursorPos.y = LONG_MIN;
+    }
+  }
+
+  else if (ptOriginalCursorPos.x != LONG_MAX ||
+           ptOriginalCursorPos.y != LONG_MIN)
+  {
+    if (PtInRect (&game_window.actual.window, ptCursorPos))
+    {
+      // Only restore the cursor pos if it is over the control panel when
+      //   closing the control panel.
+      if (SK::ControlPanel::imgui_window.hovered)
+      {
+        SK_SetCursorPos (ptOriginalCursorPos.x,
+                         ptOriginalCursorPos.y);
+      }
+    }
+  }
+}
+
 SK_API
 void
 SK_ImGui_Toggle (void)
 {
+  SK_ImGui_BackupAndRestoreCursorPos ();
+
   static ULONG64 last_frame = 0;
 
   if (last_frame != SK_GetFramesDrawn ())
@@ -8320,6 +8800,17 @@ SK_ImGui_Toggle (void)
 
   // Turns the hardware cursor on/off as needed
   ImGui_ToggleCursor ();
+
+
+  static auto Send_WM_SETCURSOR = [&](void)
+  {
+    SK_COMPAT_SafeCallProc (&game_window,
+            game_window.hWnd,                       WM_SETCURSOR,
+    (WPARAM)game_window.hWnd, MAKELPARAM (HTCLIENT, WM_MOUSEMOVE));
+  };
+
+  Send_WM_SETCURSOR ();
+
 
   // Most games
   if (! hModTBFix)
@@ -8388,20 +8879,19 @@ SK_ImGui_Toggle (void)
         if (dwWait == WAIT_OBJECT_0)
           break;
 
-        // Stupid hack to make sure the mouse cursor changes to SK's
-        //   in Unity engine games
+        // Stupid hack to make sure the mouse cursor swaps between SK's and
+        //   the game's in response to opening/closing the control panel
         if (dwWait == WAIT_OBJECT_0 + 1)
         {
           auto frames_drawn =
             SK_GetFramesDrawn ();
 
           while (frames_drawn > SK_GetFramesDrawn () - 1)
-            SK_Sleep (5);
+            SK_Sleep (0);
 
           ImGuiIO& io =
             ImGui::GetIO ();
 
-          io.WantSetMousePos  = true;
           io.WantCaptureMouse = true;
 
           POINT                 ptCursor;
@@ -8411,23 +8901,20 @@ SK_ImGui_Toggle (void)
                           &game_window.actual.window);
             if (PtInRect (&game_window.actual.window, ptCursor))
             {
-              // Move the cursor if it's not over any of SK's UI
-              if (! SK_ImGui_IsAnythingHovered ())
+              SK_SetCursorPos   (ptCursor.x + 1, ptCursor.y - 1);
+              Send_WM_SETCURSOR ();
+
+              frames_drawn =
+                SK_GetFramesDrawn ();
+
+              while (frames_drawn > SK_GetFramesDrawn () - 1)
               {
-                SK_SetCursorPos (ptCursor.x + 4, ptCursor.y - 4);
-
-                frames_drawn =
-                  SK_GetFramesDrawn ();
-
-                while (frames_drawn > SK_GetFramesDrawn () - 1)
-                  SK_Sleep (5);
-
-                SK_SetCursorPos (ptCursor.x - 4, ptCursor.y + 4);
-
-                game_window.CallProc (
-                          game_window.hWnd,                       WM_SETCURSOR,
-                  (WPARAM)game_window.hWnd, MAKELPARAM (HTCLIENT, WM_MOUSEMOVE));
+                SK_Sleep (0);
               }
+
+              SK_GetCursorPos   (&ptCursor);
+              SK_SetCursorPos   ( ptCursor.x - 1, ptCursor.y + 1);
+              Send_WM_SETCURSOR (         );
             }
           }
         }
@@ -8442,12 +8929,10 @@ SK_ImGui_Toggle (void)
   // Save config on control panel close, not open
   if (! SK_ImGui_Visible)
     config.utility.save_async ();
+
   // Move the cursor a couple of times to change the loaded image
-  else
-  {
-    if (config.input.ui.use_hw_cursor)
-      SetEvent (hMoveCursor);
-  }
+  if (config.input.ui.use_hw_cursor)
+    SetEvent (hMoveCursor);
 
 
   // Immediately stop capturing keyboard/mouse events,

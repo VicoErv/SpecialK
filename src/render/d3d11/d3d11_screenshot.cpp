@@ -1129,18 +1129,20 @@ SK_D3D11_CaptureScreenshot  ( SK_ScreenshotStage when =
   return false;
 }
 
-
-UINT filterFlags =
-  0x100000FF;
-
-float _cSdrPower  = 0.74f;//0.84f;
-float _cLerpScale = 1.3f; //2.5f;
-
 void
 SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                                     bool               wait,
                                     bool               purge)
 {
+  static std::atomic_int run_count = 0;
+
+  if (stage_ != SK_ScreenshotStage::_FlushQueue)
+    ++run_count;
+
+  else if (run_count == 0)
+    return;
+
+
   const SK_RenderBackend& rb =
     SK_GetCurrentRenderBackend ();
 
@@ -1331,6 +1333,7 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                                 _TRUNCATE );
 
               if ( config.steam.screenshots.enable_hook &&
+                  !config.platform.steam_is_b0rked      &&
                           steam_ctx.Screenshots ()      != nullptr )
               {
                 PathAppendW          (wszAbsolutePathToScreenshot, L"SK_SteamScreenshotImport.jpg");
@@ -1398,26 +1401,17 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                   final_sdr;
                   final_sdr.Initialize (meta);
 
+                ScratchImage tonemapped_copy;
+
                 static const XMVECTORF32 c_MaxNitsFor2084 =
                   { 10000.0f, 10000.0f, 10000.0f, 1.f };
 
-                static const XMVECTORF32 s_luminance_2020 =
-                  { 0.2627f,   0.678f,    0.0593f,   0.f };
-
-                static const XMMATRIX c_from2020to709 =
+                static const XMMATRIX c_from2020to709 = // Transposed
                 {
-                  {  1.6604910f, -0.1245505f, -0.0181508f, 0.f },
-                  { -0.5876411f,  1.1328999f, -0.1005789f, 0.f },
-                  { -0.0728499f, -0.0083494f,  1.1187297f, 0.f },
-                  {  0.f,         0.f,         0.f,        1.f }
-                };
-
-                static const XMMATRIX c_from709to2020 =
-                {
-                  { 0.627225305694944f,  0.329476882715808f,  0.0432978115892484f, 0.0f },
-                  { 0.0690418812810714f, 0.919605681354755f,  0.0113524373641739f, 0.0f },
-                  { 0.0163911702607078f, 0.0880887513437058f, 0.895520078395586f,  0.0f },
-                  { 0.0f,                0.0f,                0.0f,                1.0f }
+                   1.66096379471340f,   -0.124477196529907f,   -0.0181571579858552f, 0.0f,
+                  -0.588112737547978f,   1.13281946828499f,    -0.100666415661988f,  0.0f,
+                  -0.0728510571654192f, -0.00834227175508652f,  1.11882357364784f,   0.0f,
+                   0.0f,                 0.0f,                  0.0f,                1.0f
                 };
 
                 HRESULT hr = S_OK;
@@ -1447,16 +1441,17 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                 if ( un_srgb.GetImageCount () == 1 &&
                      hdr )
                 {
-                  XMVECTOR maxLum = XMVectorZero          (),
-                           minLum = XMVectorSplatInfinity (),
-                           maxCLL = XMVectorZero          (),
-                           maxRGB = XMVectorZero          ();
+                  float    maxLum = 0.0f,
+                           minLum = 5240320.0f;
+                  XMVECTOR maxCLL = XMVectorZero (),
+                           maxRGB = XMVectorZero ();
 
                   static const XMVECTORF32 s_luminance =
                     { 0.2126729f, 0.7151522f, 0.0721750f, 0.f };
 
-                  float lumTotal   = 0.0f;
-                  float N          = 0.0f;
+                  double lumTotal    = 0.0;
+                  double logLumTotal = 0.0;
+                  double N           = 0.0;
 
                   hr =              un_srgb.GetImageCount () == 1 ?
                     EvaluateImage ( un_srgb.GetImages     (),
@@ -1468,26 +1463,33 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
 
                       for (size_t j = 0; j < width; ++j)
                       {
-                        XMVECTOR v =
-                          XMVectorMax (*pixels, g_XMZero);
-
-                        maxRGB =
-                          XMVectorMax (v, maxRGB);
+                        XMVECTOR v = *pixels;
 
                         maxCLL =
                           XMVectorMax (XMVectorMultiply (v, s_luminance), maxCLL);
 
-                        v = XMVector3Dot (v, s_luminance);
+                        v =
+                          XMVector3Transform (v, c_from709toXYZ);
+
+                        const float fLum =
+                          XMVectorGetY (v);
 
                         maxLum =
-                          XMVectorMax (v, maxLum);
+                          std::max (fLum, maxLum);
 
                         minLum =
-                          XMVectorMin (v, minLum);
+                          std::min (fLum, minLum);
 
-                        lumTotal +=
-                          logf ( std::max (0.000001f, 0.000001f + v.m128_f32 [0]) ),
+                        logLumTotal +=
+                          log2 ( std::max (0.000001, static_cast <double> (std::max (0.0f, XMVectorGetY (v)))) );
+                           lumTotal +=               static_cast <double> (std::max (0.0f, XMVectorGetY (v)));
                         ++N;
+
+                        v =
+                          XMVectorMax (g_XMZero, v);
+
+                        maxRGB =
+                          XMVectorMax (v, maxRGB);
 
                         pixels++;
                       }
@@ -1496,76 +1498,157 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
 
                   maxCLL =
                     XMVectorReplicate (
-                      std::max ({ maxCLL.m128_f32 [0], maxCLL.m128_f32 [1], maxCLL.m128_f32 [2] })
+                      std::max ({ XMVectorGetX (maxCLL), XMVectorGetY (maxCLL), XMVectorGetZ (maxCLL) })
                     );
 
-                  SK_LOGi0 ( L"Min Luminance: %f, Max Luminance: %f", minLum.m128_f32 [0] * 80.0f,
-                                                                      maxLum.m128_f32 [0] * 80.0f );
+                  SK_LOGi0 ( L"Min Luminance: %f, Max Luminance: %f", std::max (0.0f, minLum) * 80.0f,
+                                                                                      maxLum  * 80.0f );
 
-                  SK_LOGi0 ( L"Mean Luminance (arithmetic, geometric): %f, %f", 80.0f * ( minLum.m128_f32 [0] + maxLum.m128_f32 [0] ) * 0.5f,
-                                                                                80.0f * expf ( (1.0f / N) * lumTotal ) );
+                  SK_LOGi0 ( L"Mean Luminance (arithmetic, geometric): %f, %f", 80.0 *      ( lumTotal    / N ),
+                                                                                80.0 * exp2 ( logLumTotal / N ) );
 
-                  pFrameData->hdr.max_cll_nits = maxCLL.m128_f32 [0] * 80.0f;
-                  pFrameData->hdr.avg_cll_nits = 80.0f * ( minLum.m128_f32 [0] + maxLum.m128_f32 [0] ) * 0.5f +
-                                                 80.0f * expf ( (1.0f / N) * lumTotal );
+                  auto        luminance_freq = std::make_unique <uint32_t []> (65536);
+                  ZeroMemory (luminance_freq.get (),     sizeof (uint32_t)  *  65536);
 
-                  hr =               un_srgb.GetImageCount () == 1 ?
-                    TransformImage ( un_srgb.GetImages     (),
-                                     un_srgb.GetImageCount (),
-                                     un_srgb.GetMetadata   (),
-                    [&](XMVECTOR* outPixels, const XMVECTOR* inPixels, size_t width, size_t y)
+                  // 0 nits - 10k nits (appropriate for screencap, but not HDR photography)
+                  minLum = std::clamp (minLum, 0.0f,   125.0f);
+                  maxLum = std::clamp (maxLum, minLum, 125.0f);
+
+                  const float fLumRange =
+                           (maxLum - minLum);
+
+                  EvaluateImage ( un_srgb.GetImages     (),
+                                  un_srgb.GetImageCount (),
+                                  un_srgb.GetMetadata   (),
+                  [&](const XMVECTOR* pixels, size_t width, size_t y)
+                  {
+                    UNREFERENCED_PARAMETER(y);
+
+                    for (size_t j = 0; j < width; ++j)
                     {
-                      UNREFERENCED_PARAMETER(y);
+                      XMVECTOR v = *pixels++;
 
-                      const XMVECTORF32 c_SdrPower =
-                        { _cSdrPower, _cSdrPower, _cSdrPower, 1.f };
+                      v =
+                        XMVector3Transform (v, c_from709toXYZ);
 
-                      XMVECTOR maxLumExp =
-                        XMVectorMultiply ( maxCLL,
-                                           maxCLL );
+                      luminance_freq [
+                        std::clamp ( (int)
+                          std::roundf (
+                            (XMVectorGetY (v) - minLum)     /
+                                                 (fLumRange / 65536.0f) ),
+                                                           0, 65535 ) ]++;
+                    }
+                  });
 
-                      for (size_t j = 0; j < width; ++j)
-                      {
-                        XMVECTOR value = XMVectorMax (inPixels [j], g_XMZero);
-                        XMVECTOR luma  = XMVector3Dot ( value, s_luminance );
+                        double percent  = 100.0;
+                  const double img_size = (double)un_srgb.GetMetadata ().width *
+                                          (double)un_srgb.GetMetadata ().height;
 
-                        XMVECTOR numerator =
-                          XMVectorAdd (
-                            g_XMOne,
-                              XMVectorDivide (
-                                luma, maxLumExp
-                              )
-                          );
+                  for (auto i = 65535; i >= 0; --i)
+                  {
+                    percent -=
+                      100.0 * ((double)luminance_freq [i] / img_size);
 
-                        XMVECTOR scale0 =
-                          XMVectorDivide (
-                            numerator, XMVectorAdd (
-                              g_XMOne, luma
-                            )
-                          );
+                    if (percent <= 99.94)
+                    {
+                      maxLum =
+                        minLum + (fLumRange * ((float)i / 65536.0f));
 
-                        XMVECTOR scale1 =
-                          XMVectorDivide (
-                            numerator, XMVectorAdd (
-                              g_XMOne, value
-                            )
-                          );
+                      break;
+                    }
+                  }
 
-                        value =
-                          XMVectorMultiply (value, XMVectorLerp (scale1, scale0, luma.m128_f32 [0] /
-                                                                               maxLum.m128_f32 [0] / _cLerpScale));
+                  pFrameData->hdr.max_cll_nits =                      80.0f * maxLum;
+                  pFrameData->hdr.avg_cll_nits = static_cast <float> (80.0  * ( lumTotal / N ));
 
-                        outPixels [j] =
-                          XMVectorPow ( value, c_SdrPower );
-                      }
-                    }, final_sdr
-                  ) : E_POINTER;
+                  // After tonemapping, re-normalize the image to preserve peak white,
+                  //   this is important in cases where the maximum luminance was < 1000 nits
+                  XMVECTOR maxTonemappedRGB = g_XMZero;
+
+                  // User's display is the canonical mastering display, anything that would have clipped
+                  //   on their display should be clipped in the tonemapped SDR image.
+                  float _maxNitsToTonemap = rb.displays [rb.active_display].gamut.maxLocalY / 80.0f;
+
+                  const float SDR_YInPQ =
+                    LinearToPQY (1.5f);
+
+                  const float  maxYInPQ =
+                    std::max (SDR_YInPQ,
+                      LinearToPQY (std::min (_maxNitsToTonemap, maxLum))
+                    );
+
+                  static std::vector <parallel_tonemap_job_s> parallel_jobs   (config.screenshots.avif.max_threads);
+                  static std::vector <HANDLE>                 parallel_start  (config.screenshots.avif.max_threads);
+                  static std::vector <HANDLE>                 parallel_finish (config.screenshots.avif.max_threads);
+                         std::vector <XMVECTOR>               parallel_pixels (un_srgb.GetMetadata ().width *
+                                                                               un_srgb.GetMetadata ().height);
+
+                  SK_Image_InitializeTonemap   (         parallel_jobs, parallel_start,      parallel_finish);
+                  SK_Image_EnqueueTonemapTask  (un_srgb, parallel_jobs, parallel_pixels, maxYInPQ, SDR_YInPQ);
+                  SK_Image_DispatchTonemapJobs (         parallel_jobs);
+                  SK_Image_GetTonemappedPixels (final_sdr, un_srgb,     parallel_pixels,     parallel_finish);
+
+                  for (auto& job : parallel_jobs)
+                  {
+                    maxTonemappedRGB =
+                      XMVectorMax (job.maxTonemappedRGB, maxTonemappedRGB);
+                  }
+
+                  float fMaxR = XMVectorGetX (maxTonemappedRGB);
+                  float fMaxG = XMVectorGetY (maxTonemappedRGB);
+                  float fMaxB = XMVectorGetZ (maxTonemappedRGB);
+
+                  if (false)
+                      //( fMaxR <  1.0f ||
+                      //  fMaxG <  1.0f ||
+                      //  fMaxB <  1.0f ) &&
+                      //( fMaxR >= 1.0f ||
+                      //  fMaxG >= 1.0f ||
+                      //  fMaxB >= 1.0f ))
+                  {
+                    float fSmallestComp =
+                      std::min ({fMaxR, fMaxG, fMaxB});
+
+                    if (fSmallestComp > .875f)
+                    {
+                      SK_LOGi0 (
+                        L"After tone mapping, maximum RGB was %4.2fR %4.2fG %4.2fB -- "
+                        L"SDR image will be normalized to min (R|G|B) and clipped.",
+                          fMaxR, fMaxG, fMaxB
+                      );
+
+                      float fRescale =
+                        (1.0f / fSmallestComp);
+
+                      XMVECTOR vNormalizationScale =
+                        XMVectorReplicate (fRescale);
+
+                      TransformImage (*final_sdr.GetImages (),
+                        [&]( _Out_writes_ (width)       XMVECTOR* outPixels,
+                              _In_reads_  (width) const XMVECTOR* inPixels,
+                                                        size_t    width,
+                                                        size_t )
+                        {
+                          for (size_t j = 0; j < width; ++j)
+                          {
+                            XMVECTOR value =
+                             inPixels [j];
+                            outPixels [j] =
+                              XMVectorSaturate (
+                                XMVectorMultiply (value, vNormalizationScale)
+                              );
+                          }
+                        }, tonemapped_copy
+                      );
+
+                      std::swap (final_sdr, tonemapped_copy);
+                    }
+                  }
 
                   if (         final_sdr.GetImageCount () == 1) {
                     Convert ( *final_sdr.GetImages     (),
-                                DXGI_FORMAT_B8G8R8X8_UNORM,
-                                  filterFlags,
-                                    TEX_THRESHOLD_DEFAULT,
+                                DXGI_FORMAT_B8G8R8X8_UNORM_SRGB,
+                                  (TEX_FILTER_FLAGS)0x200000FF, 1.0f,
                                       un_srgb );
 
                     std::swap (un_scrgb, un_srgb);
@@ -1583,11 +1666,47 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                   }
                 }
 
-                if (un_scrgb.GetImageCount () == 1 && pop_off->wantClipboardCopy () && (config.screenshots.copy_to_clipboard || (! pFrameData->AllowSaveToDisk)))
+                bool bCopiedToClipboard = false;
+
+                // Store HDR PNG copy
+                if (pFrameData->AllowSaveToDisk && config.screenshots.use_hdr_png && hdr)
                 {
-                  rb.screenshot_mgr->copyToClipboard (*un_scrgb.GetImages ());
+                  DirectX::ScratchImage                  hdr10_img;
+                  if (SK_HDR_ConvertImageToPNG (raw_img, hdr10_img))
+                  {
+                    wchar_t       wszAbsolutePathToLossless [ MAX_PATH + 2 ] = { };
+                    wcsncpy_s   ( wszAbsolutePathToLossless,  MAX_PATH,
+                                    rb.screenshot_mgr->getBasePath (),
+                                      _TRUNCATE );
+
+                    PathAppendW ( wszAbsolutePathToLossless,
+                      SK_FormatStringW ( L"HDR\\%ws.png",
+                                  pFrameData->file_name.c_str () ).c_str () );
+
+                    SK_CreateDirectories (wszAbsolutePathToLossless);
+
+                    if (SK_HDR_SavePNGToDisk (wszAbsolutePathToLossless, hdr10_img.GetImages (), &raw_img, pFrameData->title.c_str ()))
+                    {
+                      if (un_scrgb.GetImageCount () == 1 && pop_off->wantClipboardCopy () && (config.screenshots.copy_to_clipboard))
+                      {
+                        if (SK_PNG_CopyToClipboard (*hdr10_img.GetImages (), wszAbsolutePathToLossless, 0))
+                        {
+                          bCopiedToClipboard = true;
+                        }
+                      }
+                    }
+                  }
                 }
 
+                if (un_scrgb.GetImageCount () == 1 && pop_off->wantClipboardCopy () && (config.screenshots.copy_to_clipboard || (! pFrameData->AllowSaveToDisk)) && (! bCopiedToClipboard))
+                {
+                  rb.screenshot_mgr->copyToClipboard (*un_scrgb.GetImages (), hdr ? &raw_img
+                                                                                  : nullptr,
+                                                                              hdr ? wszAbsolutePathToScreenshot
+                                                                                  : nullptr);
+                }
+
+                // Store tonemapped copy
                 if (               pFrameData->AllowSaveToDisk    &&
                                    un_scrgb.GetImageCount () == 1 &&
                       SUCCEEDED (
@@ -1602,7 +1721,15 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                                 )
                    )
                 {
+#if 0
+                  if (codec == WIC_CODEC_JPEG && hdr)
+                  {
+                    SK_Screenshot_SaveUHDR (raw_img, *un_scrgb.GetImages (), wszAbsolutePathToScreenshot);
+                  }
+#endif
+
                   if ( config.steam.screenshots.enable_hook &&
+                      !config.platform.steam_is_b0rked      &&
                           steam_ctx.Screenshots () != nullptr )
                   {
                     wchar_t       wszAbsolutePathToThumbnail [ MAX_PATH + 2 ] = { };
@@ -1819,27 +1946,18 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                           {    pDst [j] = 255UL;        }
                         } break;
 
-                      //case DXGI_FORMAT_R10G10B10A2_UNORM:
-                      //{
-                      //  for ( UINT j = 3                          ;
-                      //             j < pFrameData->PackedDstPitch ;
-                      //             j += 4 )
-                      //  {    pDst [j]  |=  0x3;       }
-                      //} break;
-
                         case DXGI_FORMAT_R16G16B16A16_FLOAT:
                         {
+                          using namespace DirectX::PackedVector;
+
+                          static const HALF g_XMOneFP16 (XMConvertFloatToHalf (1.0f));
+
                           for ( UINT j  = 0                          ;
                                      j < pFrameData->PackedDstPitch  ;
                                      j += 8 )
                           {
-                            glm::vec4 color =
-                              glm::unpackHalf4x16 (*((uint64*)&(pDst [j])));
-
-                            color.a = 1.0f;
-
-                            *((uint64*)& (pDst[j])) =
-                              glm::packHalf4x16 (color);
+                            ((XMHALF4 *)&(pDst [j]))->w =
+                              g_XMOneFP16;
                           }
                         } break;
                       }
@@ -1875,7 +1993,8 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                       }
                     }
 
-                    if (pFrameData->AllowSaveToDisk && config.screenshots.png_compress)
+                    // Handle Normal PNG or JXR/AVIF; HDR PNG was already handled above...
+                    if (pFrameData->AllowSaveToDisk && config.screenshots.png_compress && ((! config.screenshots.use_hdr_png) || (! hdr)))
                     {
                       SK_CreateDirectories (wszAbsolutePathToLossless);
 
@@ -1889,9 +2008,15 @@ SK_D3D11_ProcessScreenshotQueueEx ( SK_ScreenshotStage stage_,
                                                                                     static_cast <uint16_t> (std::max (0.0f, pFrameData->hdr.avg_cll_nits)));
                       }
 
+                      if (hdr && config.screenshots.use_jxl)
+                      {
+                        SK_Screenshot_SaveJXL (un_srgb, wszAbsolutePathToLossless);
+                      }
+
                       HRESULT hrSaveToWIC = S_OK;
 
-                      if ((! hdr) || (! config.screenshots.use_avif))
+                      if ((! hdr) || (! (config.screenshots.use_avif ||
+                                         config.screenshots.use_jxl)))
                       {
                         const bool bUseCompatHacks =
                           config.screenshots.compatibility_mode;

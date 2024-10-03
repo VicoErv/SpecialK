@@ -85,6 +85,16 @@ struct SK_ImGui_D3D11_BackbufferResourceIsolation {
       ID3D11UnorderedAccessView
   >                         pUnorderedAccessView    = nullptr;
 
+  // Keep a temporary copy of the last frame for use during
+  //   screenshot snipping.
+  struct {
+    SK_ComPtr
+      < ID3D11Texture2D >  pScreenCopy              = nullptr;
+    SK_ComPtr <
+      ID3D11ShaderResourceView
+    >                      pScreenView              = nullptr;
+  } snipping;
+
   ID3D11Buffer*             pVB                     = nullptr;
   ID3D11Buffer*             pIB                     = nullptr;
 
@@ -1636,6 +1646,12 @@ ImGui_ImplDX11_InvalidateDeviceObjects (void)
 
     if (_P->pBackBuffer.p)
         _P->pBackBuffer.Release ();
+
+    if (_P->snipping.pScreenCopy.p)
+        _P->snipping.pScreenCopy.Release ();
+
+    if (_P->snipping.pScreenView.p)
+        _P->snipping.pScreenView.Release ();
   };
 
   //for ( UINT i = 0 ; i < _MAX_BACKBUFFERS ; ++i )
@@ -1833,6 +1849,36 @@ SK_D3D11_RenderCtx::init (IDXGISwapChain*      pSwapChain,
                                      swapDesc.OutputWindow ),
               L"D3D11BkEnd" );
 
+    auto& rb =
+      SK_GetCurrentRenderBackend ();
+
+    rb.displays [rb.active_display].statistics.vblank_counter.resetStats ();
+
+
+    // Re-apply colorspace if necessary
+
+    // {018B57E4-1493-4953-ADF2-DE6D99CC05E5}
+    static constexpr GUID SKID_SwapChainColorSpace =
+    { 0x18b57e4, 0x1493, 0x4953, { 0xad, 0xf2, 0xde, 0x6d, 0x99, 0xcc, 0x5, 0xe5 } };
+
+    UINT                  uiColorSpaceSize = sizeof (DXGI_COLOR_SPACE_TYPE);
+    DXGI_COLOR_SPACE_TYPE csp              = DXGI_COLOR_SPACE_RESERVED;
+
+    // Since SwapChains don't have a Get method, we'll just have the SwapChain remember the last one
+    //   set and check it for consistency... set a colorspace override if necessary.
+    if (SUCCEEDED (pSwapChain->GetPrivateData (SKID_SwapChainColorSpace, &uiColorSpaceSize, &csp)))
+    {
+      SK_ComQIPtr <IDXGISwapChain3>
+                       pSwapChain3
+                      (pSwapChain);
+
+      // Invoke our own hook using the private data, in case an external application has set this,
+      //  that way we can handle HDR correctly even if the hook on SetColorSpace1 isn't working.
+      if (pSwapChain3 != nullptr)
+          pSwapChain3->SetColorSpace1 (csp);
+    }
+
+
     if ((! ImGui_ImplDX11_Init (pSwapChain, pDevice, pDeviceCtx)) ||
                 _Frame [0].pBackBuffer.p          == nullptr  ||
                 _Frame [0].pRenderTargetView.p    == nullptr/*||
@@ -1927,6 +1973,12 @@ SK_D3D11_RenderCtx::release (IDXGISwapChain* pSwapChain)
     if (_pSwapChain.p != nullptr)
         _pSwapChain->GetDesc (&swapDesc);
 
+    if (_pSwapChain.p == nullptr && _pDevice.p == nullptr)
+    {
+      SK_LOGi1 (L"Releasing D3D11 Render Context that was never initialized!");
+    }
+
+    else
     SK_LOG0 ( ( L"(-) Releasing D3D11 Render Context: Device=%08xh, SwapChain: {%lu x %hs, HWND=%08xh}",
                                         _pDevice.p,
                                         swapDesc.BufferCount,
@@ -2085,7 +2137,9 @@ SK_D3D11_RenderCtx::present (IDXGISwapChain* pSwapChain)
       }
 #endif
 
-      if (config.render.dxgi.srgb_behavior > 0)
+      // Apply sRGB gamma curve
+      if (config.render.dxgi.srgb_behavior > 0 ||
+          config.render.dxgi.srgb_behavior == -2)
         SK_DXGI_LinearizeSRGB (_pSwapChain);
     }
 
@@ -2094,6 +2148,27 @@ SK_D3D11_RenderCtx::present (IDXGISwapChain* pSwapChain)
       // Last-ditch effort to get the HDR post-process done before the UI.
       SK_HDR_SnapshotSwapchain ();
     }
+
+    /////if (rb.screenshot_mgr->getSnipState () == SK_ScreenshotManager::SnippingRequested)
+    /////{
+    /////  rb.screenshot_mgr->setSnipState (SK_ScreenshotManager::SnippingInactive);
+    /////
+    /////  _Frame [0].snipping.pScreenCopy = nullptr;
+    /////  _Frame [0].snipping.pScreenView = nullptr;
+    /////
+    /////  if (_Frame [0].pBackBuffer.p != nullptr)
+    /////  {
+    /////    D3D11_TEXTURE2D_DESC              texDesc = { };
+    /////    _Frame [0].pBackBuffer->GetDesc (&texDesc);
+    /////
+    /////    if (SUCCEEDED (_pDevice->CreateTexture2D (&texDesc, nullptr, &_Frame [0].snipping.pScreenCopy)))
+    /////    {
+    /////      _pDevice->CreateShaderResourceView (_Frame [0].snipping.pScreenCopy, nullptr, &_Frame [0].snipping.pScreenView.p);
+    /////
+    /////      rb.screenshot_mgr->setSnipState (SK_ScreenshotManager::SnippingActive);
+    /////    }
+    /////  }
+    /////}
 
     if (_pSwapChain == pSwapChain || ImGui_DX11Startup (_pSwapChain))
     {

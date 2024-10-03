@@ -512,7 +512,8 @@ DllMain ( HMODULE hModule,
       std::atexit (SK_LazyCleanup);
 #endif
 
-      config =
+      game_window =  sk_window_s {};
+      config      =
         sk_config_t::sk_config_t ();
 
 
@@ -536,7 +537,6 @@ DllMain ( HMODULE hModule,
           // This is not the process SKIF is looking for :)
           SK_Inject_SuppressExitNotify (       );
           SK_DLL_SetAttached           ( false );
-          DisableThreadLibraryCalls    (hModule);
           CreateTeardownEvent          (       );
         }
 
@@ -576,6 +576,8 @@ DllMain ( HMODULE hModule,
 
       SK_TLS_Acquire       ();
       SK_EstablishRootPath ();
+
+      SK_TLS_Bottom ()->debug.in_DllMain = true;
 
       if (dll_isolation_lvl >  0)                  return EarlyOut (TRUE);
 

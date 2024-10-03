@@ -30,7 +30,7 @@ float4 main (PS_INPUT input) : SV_Target
     texture0.Sample (sampler0, input.uv);
  
   // Font Width/Height is only set on Font passes...
-  if (font_dims.x + font_dims.y > 0.0f)
+  if (dot (font_dims, 1.0f) > 0.0f)
   {
     // Font is a single-channel alpha texture,
     //   supply 1.0 for rgb channels
@@ -40,8 +40,8 @@ float4 main (PS_INPUT input) : SV_Target
   float4 orig_col =
      abs (out_col);
 
-  float  ui_alpha = saturate (input.col.a ) * saturate (out_col.a );
-  float3 ui_color =           input.col.rgb *           out_col.rgb;
+  float  ui_alpha = saturate (input.col.a   * out_col.a );
+  float3 ui_color =           input.col.rgb * out_col.rgb;
 
   //
   // HDR (HDR10 or scRGB)
@@ -49,11 +49,14 @@ float4 main (PS_INPUT input) : SV_Target
   if (viewport.z > 0.f)
   {
     bool hdr10 = (input.uv3.x < 0.0);
-        
+
+    float hdr_scale = hdr10 ? (-input.uv3.x) / 80.0f
+                              : input.uv3.x;
+
     if ( input.uv2.x > 0.0f &&
          input.uv2.y > 0.0f )
     {
-      out_col.rgb =
+      out_col.rgb =  sign (out_col.rgb) *
         pow (
           RemoveSRGBCurve (out_col.rgb),
                 input.uv2.yyy
@@ -66,39 +69,39 @@ float4 main (PS_INPUT input) : SV_Target
       out_col =
         float4 (        RemoveGammaExp (                  ui_color,  2.2f ),
             1.0f - RemoveAlphaGammaExp ( max (0.0, 1.0f - ui_alpha), 2.2f ) );
-    }
 
-    float hdr_scale  = hdr10 ? ( -input.uv3.x / 10000.0 )
-                             :    input.uv3.x;
+      out_col.rgb =
+        expandGamut (out_col.rgb * hdr_scale, 0.333f) / hdr_scale;
+    }
 
     float hdr_offset = 0.0f;//hdr10 ? 0.0f : input.uv3.z;
                             //hdr_scale -= hdr_offset;
 
     float4 hdr_out =
-      float4 (   ( hdr10 ?
-        LinearToST2084 (
-          REC709toREC2020 ( expandGamut (out_col.rgb            , 0.08) * ui_alpha) * hdr_scale) :
-     Clamp_scRGB_StripNaN ( expandGamut (out_col.rgb * hdr_scale, 0.08) )
-                 )                                   + hdr_offset, 
-                   hdr10 ?         LinearToPQY (       ui_alpha, 5.5)
-                         :                             out_col.a );
+      hdr10 ? float4 (  LinearToPQ (
+                   REC709toREC2020 ( out_col.rgb * (ui_alpha / 2.0f) * (hdr_scale * 2.0f) ), 100.0f ),
+                        LinearToPQ ( out_col.a               * 8.66f,                        125.0f ) )
+            : float4 ( Clamp_scRGB ( out_col.rgb             * hdr_scale ),
+                                     out_col.a );
 
     // Keep pure black pixels as-per scRGB's limited ability to
     //   represent a black pixel w/ FP16 precision
     hdr_out.rgb *=
-      ( (orig_col.r > FP16_MIN) +
-        (orig_col.g > FP16_MIN) +
-        (orig_col.b > FP16_MIN) > 0.0f );
+      (dot (orig_col.rgb, 1.0f) > FP16_MIN);
 
     hdr_out.a *= (orig_col.a > FP16_MIN);
 
     float alpha_mul =
       (hdr10 ? 1.0
              : ui_alpha ); // Use linear alpha in scRGB
-    
+
     if (hdr10)
     {
-      hdr_out.rgba = clamp (hdr_out.rgba, 0.0, 1.0);
+      hdr_out.rgba =
+        saturate (hdr_out.rgba);
+
+      hdr_out.rgb =
+        min (LinearToPQ ((hdr_scale).xxx, 100.0f) / hdr_out.a, hdr_out.rgb) * hdr_out.a;
     }
 
     return

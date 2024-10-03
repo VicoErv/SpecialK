@@ -1,4 +1,4 @@
-/**
+﻿/**
  * This file is part of Special K.
  *
  * Special K is free software : you can redistribute it
@@ -280,6 +280,11 @@ _COM_Outptr_  void                              **ppPipelineState )
 {
   SK_LOG_FIRST_CALL
 
+  if (ppPipelineState == nullptr)
+    return E_INVALIDARG;
+
+  *ppPipelineState = nullptr;
+
   SK_LOG0 ( ( L"LoadGraphicsPipeline (%ws)", pName ), __SK_SUBSYSTEM__ );
 
   return
@@ -370,6 +375,8 @@ D3D12Device1_CreatePipelineLibrary_Detour (
 void
 SK_D3D12_HookPipelineLibrary (ID3D12Device1* pDevice1)
 {
+  return;
+
   if (pDevice1 == nullptr)
     return;
 

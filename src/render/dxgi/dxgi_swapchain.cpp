@@ -124,6 +124,9 @@ IWrapDXGISwapChain::RegisterDestructionCallback (void)
     E_NOTIMPL;
 }
 
+struct DECLSPEC_UUID ("ADEC44E2-61F0-45C3-AD9F-1B37379284FF")
+  IStreamlineBaseInterface : IUnknown { };
+
 // IDXGISwapChain
 HRESULT
 STDMETHODCALLTYPE
@@ -141,6 +144,14 @@ IWrapDXGISwapChain::QueryInterface (REFIID riid, void **ppvObj)
     pReal->AddRef ();
 
     return S_OK;
+  }
+
+  // Keep SwapChain wrapping the hell away from Streamline!
+  else if (riid == __uuidof (IStreamlineBaseInterface))
+  {
+    SK_LOGi1 (L"Tried to get Streamline Base Interface for a SwapChain that SK has wrapped...");
+
+    return E_NOINTERFACE;
   }
 
   else if (
@@ -197,6 +208,27 @@ IWrapDXGISwapChain::QueryInterface (REFIID riid, void **ppvObj)
     return S_OK;
   }
 
+
+#if 0
+  static IID IID_Mystery0;
+  static IID IID_Mystery1;
+
+  SK_RunOnce (IIDFromString (L"{10B90151-4435-4004-9FAD-19361488899A}", &IID_Mystery0));
+  SK_RunOnce (IIDFromString (L"{AABDF0C6-6A76-4F65-987D-F2CC4C27ED0E}", &IID_Mystery1));
+
+  if (InlineIsEqualGUID (IID_Mystery0, riid) ||
+      InlineIsEqualGUID (IID_Mystery1, riid))
+  {
+    wchar_t                wszGUID [41] = { };
+    StringFromGUID2 (riid, wszGUID, 40);
+
+    SK_LOGi0 (L"Disabling unknown interface: %ws", wszGUID);
+
+    return E_NOINTERFACE;
+  }
+#endif
+
+
   HRESULT hr =
     pReal->QueryInterface (riid, ppvObj);
 
@@ -228,10 +260,19 @@ ULONG
 STDMETHODCALLTYPE
 IWrapDXGISwapChain::AddRef (void)
 {
-  InterlockedIncrement (&refs_);
+  ULONG xrefs =
+    InterlockedIncrement (&refs_);
+
+  ULONG refs =
+    pReal->AddRef ();
+
+  SK_LOGi3 (
+    L"IWrapDXGISwapChain::AddRef (...): "
+    L"External=%lu, Actual=%lu",
+      xrefs, refs );
 
   return
-    pReal->AddRef ();
+    refs;
 }
 
 ULONG
@@ -272,6 +313,8 @@ IWrapDXGISwapChain::Release (void)
 
   HWND hwnd = hWnd_;
 
+  // External references are now 0... game expects SwapChain destruction.
+  //
   if (xrefs == 0)
   {
     // We're going to make this available for recycling
@@ -281,10 +324,44 @@ IWrapDXGISwapChain::Release (void)
         this, std::exchange (hWnd_, (HWND)0), pDev
       );
     }
+
+    auto& rb =
+      SK_GetCurrentRenderBackend ();
+
+    _d3d12_rbk->drain_queue ();
+
+    //  If this SwapChain is the primary one that SK is rendering to,
+    //    then we must teardown our render backend to eliminate internal
+    //      references preventing the SwapChain from being destroyed.
+    if ( rb.swapchain.p == this ||
+         rb.swapchain.p == pReal )
+    {
+      // This is a hard reset, we're going to get a new cmd queue
+      _d3d11_rbk->release (_d3d11_rbk->_pSwapChain);
+      _d3d12_rbk->release (_d3d12_rbk->_pSwapChain);
+      _d3d12_rbk->_pCommandQueue.Release ();
+
+      rb.releaseOwnedResources ();
+    }
   }
 
   ULONG refs =
     pReal->Release ();
+
+
+  SK_LOGi3 (
+    L"IWrapDXGISwapChain::Release (...): "
+    L"External=%lu, Actual=%lu",
+     xrefs, refs );
+
+  if (xrefs == 0 && refs != 0)
+  {
+    SK_LOGi0 (
+      L"IWrapDXGISwapChain::Release (...) should have returned 0, "
+      L"but %lu references remain...", refs
+    );
+  }
+
 
   if (refs == 0)
   {
@@ -297,6 +374,23 @@ IWrapDXGISwapChain::Release (void)
       InterlockedDecrement (&SK_DXGI_LiveWrappedSwapChains);
 
     pDev.Release ();
+
+    if ((! _d3d12_rbk->frames_.empty ()) ||
+           _d3d12_rbk->_pCommandQueue.p != nullptr)
+    {
+      SK_LOGi0 (
+        L"Clearing ImGui D3D12 Command Queue because SwapChain using it "
+        L"was destroyed..." );
+
+      // Finish up any queued presents, then re-initialize the command queue
+      _d3d12_rbk->release (_d3d12_rbk->_pSwapChain);
+      _d3d12_rbk->_pCommandQueue.Release ();
+
+      auto& rb =
+        SK_GetCurrentRenderBackend ();
+
+      rb.releaseOwnedResources ();
+    }
 
     //delete this;
   }
@@ -421,6 +515,9 @@ STDMETHODCALLTYPE IWrapDXGISwapChain::GetPrivateData (REFGUID Name, UINT *pDataS
       }
     }
   }
+
+  if (pDataSize == nullptr || pData == nullptr)
+    return E_INVALIDARG;
 
   return
     pReal->GetPrivateData (Name, pDataSize, pData);
@@ -646,9 +743,9 @@ IWrapDXGISwapChain::GetBuffer (UINT Buffer, REFIID riid, void **ppSurface)
              texDesc.Width  == swapDesc.BufferDesc.Width  &&
              texDesc.Height == swapDesc.BufferDesc.Height &&
              DirectX::MakeTypeless (            texDesc.Format) ==
-             DirectX::MakeTypeless (swapDesc.BufferDesc.Format) &&
-             std::exchange (flip_model.last_srgb_mode, config.render.dxgi.srgb_behavior) ==
-                                                       config.render.dxgi.srgb_behavior )
+             DirectX::MakeTypeless (swapDesc.BufferDesc.Format) && !rb.active_traits.bOriginallysRGB )
+             //std::exchange (flip_model.last_srgb_mode, config.render.dxgi.srgb_behavior) ==
+             //                                          config.render.dxgi.srgb_behavior )
       {
         return
           _backbuffers [Buffer]->QueryInterface (riid, ppSurface);
@@ -678,12 +775,8 @@ IWrapDXGISwapChain::GetBuffer (UINT Buffer, REFIID riid, void **ppSurface)
           // sRGB is being turned off for Flip Model
           if (rb.active_traits.bOriginallysRGB && (! scrgb_hdr))
           {
-            if (config.render.dxgi.srgb_behavior >= 1)
-              texDesc.Format =
-                  DirectX::MakeSRGB (DirectX::MakeTypelessUNORM (typeless));
-            else
-              texDesc.Format = typeless;
-
+            texDesc.Format =
+                DirectX::MakeSRGB (DirectX::MakeTypelessUNORM (typeless));
           }
 
           // HDR Override: Firm override to a typed format is safe
@@ -1404,10 +1497,96 @@ IWrapDXGISwapChain::SetHDRMetaData ( DXGI_HDR_METADATA_TYPE  Type,
 {
   assert (ver_ >= 4);
 
-  dll_log->Log (L"[ DXGI HDR ] <*> HDR Metadata");
+  dll_log->Log (L"[ DXGI HDR ] <*> HDR Metadata: %ws",
+                      Type == DXGI_HDR_METADATA_TYPE_NONE ? L"Disabled"
+                                                          : L"HDR10");
 
-  if (__SK_HDR_10BitSwap || __SK_HDR_16BitSwap)
-    return S_OK;
+  DXGI_HDR_METADATA_HDR10 metadata = {};
+
+  if (Type == DXGI_HDR_METADATA_TYPE_NONE || (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10))
+  {
+    if (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10)
+    {
+      metadata =
+        *(DXGI_HDR_METADATA_HDR10 *)pMetaData;
+
+      SK_LOGi0 (
+        L"HDR Metadata: Max Mastering=%d nits, Min Mastering=%f nits, MaxCLL=%d nits, MaxFALL=%d nits",
+        metadata.MaxMasteringLuminance, (double)metadata.MinMasteringLuminance * 0.0001,
+        metadata.MaxContentLightLevel,          metadata.MaxFrameAverageLightLevel
+      );
+    }
+
+    if (config.render.dxgi.hdr_metadata_override == -1)
+    {
+      auto& rb =
+        SK_GetCurrentRenderBackend ();
+
+      auto& display =
+        rb.displays [rb.active_display];
+
+      if (display.gamut.maxLocalY == 0.0f)
+      {
+        SK_ComPtr <IDXGIOutput>      pOutput;
+        pReal->GetContainingOutput (&pOutput.p);
+
+        SK_ComQIPtr <IDXGIOutput6>
+            pOutput6 (   pOutput);
+        if (pOutput6.p != nullptr)
+        {
+          DXGI_OUTPUT_DESC1    outDesc1 = { };
+          pOutput6->GetDesc1 (&outDesc1);
+
+          display.gamut.maxLocalY   = outDesc1.MaxLuminance;
+          display.gamut.maxAverageY = outDesc1.MaxFullFrameLuminance;
+          display.gamut.maxY        = outDesc1.MaxLuminance;
+          display.gamut.minY        = outDesc1.MinLuminance;
+          display.gamut.xb          = outDesc1.BluePrimary  [0];
+          display.gamut.yb          = outDesc1.BluePrimary  [1];
+          display.gamut.xg          = outDesc1.GreenPrimary [0];
+          display.gamut.yg          = outDesc1.GreenPrimary [1];
+          display.gamut.xr          = outDesc1.RedPrimary   [0];
+          display.gamut.yr          = outDesc1.RedPrimary   [1];
+          display.gamut.Xw          = outDesc1.WhitePoint   [0];
+          display.gamut.Yw          = outDesc1.WhitePoint   [1];
+          display.gamut.Zw          = 1.0f - display.gamut.Xw - display.gamut.Yw;
+
+          SK_ReleaseAssert (outDesc1.Monitor == display.monitor || display.monitor == 0);
+        }
+      }
+
+      metadata.MinMasteringLuminance     = sk::narrow_cast <UINT>   (display.gamut.minY / 0.0001);
+      metadata.MaxMasteringLuminance     = sk::narrow_cast <UINT>   (display.gamut.maxY);
+      metadata.MaxContentLightLevel      = sk::narrow_cast <UINT16> (display.gamut.maxLocalY);
+      metadata.MaxFrameAverageLightLevel = sk::narrow_cast <UINT16> (display.gamut.maxAverageY);
+
+      metadata.BluePrimary  [0]          = sk::narrow_cast <UINT16> (0.1500/*display.gamut.xb*/ * 50000.0F);
+      metadata.BluePrimary  [1]          = sk::narrow_cast <UINT16> (0.0600/*display.gamut.yb*/ * 50000.0F);
+      metadata.RedPrimary   [0]          = sk::narrow_cast <UINT16> (0.6400/*display.gamut.xr*/ * 50000.0F);
+      metadata.RedPrimary   [1]          = sk::narrow_cast <UINT16> (0.3300/*display.gamut.yr*/ * 50000.0F);
+      metadata.GreenPrimary [0]          = sk::narrow_cast <UINT16> (0.3000/*display.gamut.xg*/ * 50000.0F);
+      metadata.GreenPrimary [1]          = sk::narrow_cast <UINT16> (0.6000/*display.gamut.yg*/ * 50000.0F);
+      metadata.WhitePoint   [0]          = sk::narrow_cast <UINT16> (0.3127/*display.gamut.Xw*/ * 50000.0F);
+      metadata.WhitePoint   [1]          = sk::narrow_cast <UINT16> (0.3290/*display.gamut.Yw*/ * 50000.0F);
+        
+      SK_RunOnce (
+        SK_LOGi0 (
+          L"Metadata Override: Max Mastering=%d nits, Min Mastering=%f nits, MaxCLL=%d nits, MaxFALL=%d nits",
+          metadata.MaxMasteringLuminance, (double)metadata.MinMasteringLuminance * 0.0001,
+          metadata.MaxContentLightLevel,          metadata.MaxFrameAverageLightLevel
+        )
+      );
+
+      if (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10)
+        *(DXGI_HDR_METADATA_HDR10 *)pMetaData = metadata;
+      else
+      {
+        pMetaData = &metadata;
+        Size      = sizeof (DXGI_HDR_METADATA_HDR10);
+        Type      = DXGI_HDR_METADATA_TYPE_HDR10;
+      }
+    }
+  }
 
   //SK_LOG_FIRST_CALL
 
@@ -1438,6 +1617,20 @@ SK_DXGI_SwapChain_SetFullscreenState_Impl (
   _Return =
     [&](HRESULT hr)
     {
+      if (SUCCEEDED (hr) && Fullscreen == TRUE)
+      {
+        if (config.render.dxgi.fake_fullscreen_mode)
+        {
+          HWND hWnd = game_window.hWnd;
+
+          SK_ComQIPtr <IDXGISwapChain1>
+                           pSwapChain1 (pSwapChain);
+                                        pSwapChain1->GetHwnd (&hWnd);
+          SK_RealizeForegroundWindow (                         hWnd);
+                          ShowWindow (hWnd,                 SW_SHOW);
+        }
+      }
+
       return hr;
     };
 
@@ -1554,6 +1747,7 @@ SK_DXGI_SwapChain_SetFullscreenState_Impl (
       pTarget    = nullptr;
       dll_log->Log ( L"[   DXGI   ]  >> Display Override "
                      L"(Requested: Fullscreen, Using: Windowed)" );
+      SK_Window_RemoveBorders ();
     }
 
     else if (request_mode_change == mode_change_request_e::Fullscreen &&
@@ -2003,7 +2197,9 @@ SK_DXGI_SwapChain_ResizeBuffers_Impl (
   if (config.render.output.force_10bpc && (! __SK_HDR_16BitSwap))
   {
     if ( DirectX::MakeTypeless (NewFormat) ==
-         DirectX::MakeTypeless (DXGI_FORMAT_R8G8B8A8_UNORM) )
+         DirectX::MakeTypeless (DXGI_FORMAT_R8G8B8A8_UNORM) || 
+         DirectX::MakeTypeless (NewFormat) ==
+         DirectX::MakeTypeless (DXGI_FORMAT_B8G8R8A8_UNORM) )
     {
       SK_LOGi0 ( L" >> 8-bpc format (%hs) replaced with "
                  L"DXGI_FORMAT_R10G10B10A2_UNORM for 10-bpc override",
@@ -2127,13 +2323,13 @@ SK_DXGI_SwapChain_ResizeBuffers_Impl (
     switch (NewFormat)
     {
       case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
-        NewFormat = DXGI_FORMAT_B8G8R8A8_UNORM;
+        NewFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
         dll_log->Log ( L"[ DXGI 1.2 ]  >> sRGB (B8G8R8A8) Override "
                        L"Required to Enable Flip Model" );
         rb.srgb_stripped = true;
         break;
       case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-        NewFormat = DXGI_FORMAT_R8G8B8A8_UNORM;
+        NewFormat = DXGI_FORMAT_R10G10B10A2_UNORM;
         dll_log->Log ( L"[ DXGI 1.2 ]  >> sRGB (R8G8B8A8) Override "
                        L"Required to Enable Flip Model" );
         rb.srgb_stripped = true;

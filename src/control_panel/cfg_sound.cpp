@@ -31,7 +31,7 @@ SK_LazyGlobal <SK_MMDev_AudioEndpointVolumeCallback> volume_mgr;
 SK_WASAPI_SessionManager&
 SK_WASAPI_GetSessionManager (void)
 {
-  (void)volume_mgr.getPtr ();
+  std::ignore = volume_mgr.getPtr ();
 
   static SK_WASAPI_SessionManager sessions;
   return                          sessions;
@@ -40,7 +40,7 @@ SK_WASAPI_GetSessionManager (void)
 SK_WASAPI_AudioSession*&
 SK_WASAPI_GetAudioSession (void)
 {
-  (void)volume_mgr.getPtr ();
+  std::ignore = volume_mgr.getPtr ();
 
   static SK_WASAPI_AudioSession* audio_session;
   return                         audio_session;
@@ -873,7 +873,7 @@ SK_ImGui_VolumeManager (void)
         }
 
         else
-          ImGui::Text ( "Latency:\t%.1f ms @ %d kHz",
+          ImGui::Text ( "Latency:\t%.1f ms @ %lu kHz",
                           cur_lat.milliseconds,
                           cur_lat.samples_per_sec / 1000UL );
       }

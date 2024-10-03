@@ -25,6 +25,7 @@
 #include <imgui/font_awesome.h>
 
 #include <hidclass.h>
+#include <cwctype>
 
 bool cursor_vis = false;
 
@@ -265,7 +266,7 @@ SK::ControlPanel::Input::Draw (void)
 
 
 #define UPDATE_BACKEND_TIMES(backend,name,func)                                         \
-  if (SK_##backend##_Backend->##func## ())                                              \
+  if ((SK_##backend##_Backend)->##func ())                                              \
   {                                                                                     \
     last_##name = SK_##backend##_Backend->active.hidden ? last_##name   : current_time; \
     hide_##name = SK_##backend##_Backend->active.hidden ? current_time  : hide_##name;  \
@@ -284,12 +285,12 @@ SK::ControlPanel::Input::Draw (void)
     UPDATE_BACKEND_TIMES (Win32,           win32, nextFrameWin32);
     UPDATE_BACKEND_TIMES (WinMM,           winmm, nextFrame);
 
-#define SETUP_LABEL_COLOR(name,threshold)                               \
-      const DWORD input_time = std::max (last_##name##, hide_##name##); \
-                                                                        \
+#define SETUP_LABEL_COLOR(name,threshold)                           \
+      const DWORD input_time = std::max (last_##name, hide_##name); \
+                                                                    \
       ImGui::PushStyleColor (ImGuiCol_Text, ImColor::HSV (0.4f - (0.4f * ((float)current_time - \
-                                                                          (float)  input_time) / (threshold)), (hide_##name## >= last_##name##) ? 0.0f : 1.0f, \
-                                                                                                               (hide_##name## >= last_##name##) ? 0.6f : 0.8f).Value);
+                                                                          (float)  input_time) / (threshold)), (hide_##name >= last_##name) ? 0.0f : 1.0f, \
+                                                                                                               (hide_##name >= last_##name) ? 0.6f : 0.8f).Value);
 
     if ( last_steam > current_time - 500UL ||
          hide_steam > current_time - 500UL )
@@ -723,16 +724,7 @@ SK::ControlPanel::Input::Draw (void)
             {
               SK_ImGui_Cursor.force = sk_cursor_state::Visible;
 
-              // The correct way to handle this is send a message to the game's
-              //  window proc, and let the wndprochandler call ShowCursor from its thread...
-              //
-              //    But this works in enough cases for now.
-              static constexpr auto          _MaxTries = 25;
-              for ( UINT tries = 0 ; tries < _MaxTries ; ++tries )
-              {
-                if (SK_ShowCursor (TRUE) >= 0)
-                  break;
-              }
+              SK_SendMsgShowCursor (TRUE);
             }
           }
 
@@ -742,23 +734,7 @@ SK::ControlPanel::Input::Draw (void)
             {
               SK_ImGui_Cursor.force = sk_cursor_state::Hidden;
 
-              // The correct way to handle this is send a message to the game's
-              //  window proc, and let the wndprochandler call ShowCursor from its thread...
-              //
-              //    But this works in enough cases for now.
-              static constexpr auto          _MaxTries = 25;
-              for ( UINT tries = 0 ; tries < _MaxTries ; ++tries )
-              {
-                if (SK_ShowCursor (FALSE) < 0)
-                  break;
-              }
-            }
-
-            if (ImGui::IsItemHovered ())
-            {
-              ImGui::SetTooltip (
-                "May not work in some games, auto-hide (0.0 seconds) may help..."
-              );
+              SK_SendMsgShowCursor (FALSE);
             }
           }
         }
@@ -1055,14 +1031,33 @@ SK::ControlPanel::Input::Draw (void)
           (int *)&config.input.gamepad.xinput.ui_slot;
 
         if (config.input.gamepad.xinput.ui_slot != 4)
-          ImGui::RadioButton (
-            SK_FormatString ("Auto (XInput " ICON_FA_GAMEPAD " %d)##XInputSlot",
-                              config.input.gamepad.xinput.ui_slot).c_str (), ui_slot, *ui_slot);
+        {
+          if ( ( connected [0] | connected [1] |
+                 connected [2] | connected [3] )
+                  || SK_HID_PlayStationControllers.empty () )
+          {
+            ImGui::RadioButton (
+              SK_FormatString (
+                (! SK_HID_PlayStationControllers.empty ()) ?
+                "Auto (" ICON_FA_PLAYSTATION "/" ICON_FA_XBOX " "
+                                          ICON_FA_GAMEPAD " %d)##XInputSlot":
+                "Auto (" ICON_FA_XBOX " " ICON_FA_GAMEPAD " %d)##XInputSlot",
+                  config.input.gamepad.xinput.ui_slot).c_str (),
+                                              ui_slot, *ui_slot);
+          }
+          else
+          {
+            ImGui::RadioButton (
+              "Auto (" ICON_FA_PLAYSTATION " " ICON_FA_GAMEPAD ")##XInputSlot",
+                                              ui_slot, *ui_slot);
+          }
+        }
         else
-          ImGui::RadioButton (R"(Auto##XInputSlot)",                         ui_slot, 0);
+          ImGui::RadioButton (R"(Auto##XInputSlot)",    ui_slot, 0);
 
         ImGui::SameLine    ();
-        ImGui::RadioButton ("Nothing##XInputSlot", (int *)&config.input.gamepad.xinput.ui_slot, 4);
+        ImGui::RadioButton ("Nothing##XInputSlot",
+                    (int *)&config.input.gamepad.xinput.ui_slot, 4);
 
         if (ImGui::IsItemHovered ())
           ImGui::SetTooltip ("Config menu will only respond to keyboard/mouse input");
@@ -1313,7 +1308,7 @@ SK::ControlPanel::Input::Draw (void)
 
               else
               {
-                ImGui::BulletText ("Inputs Processed:\t%d", journal.packet_count.real);
+                ImGui::BulletText ("Inputs Processed:\t%lu", journal.packet_count.real);
               }
 
               ImGui::EndTooltip  ( );
@@ -1358,32 +1353,6 @@ SK::ControlPanel::Input::Draw (void)
           config.input.gamepad.hid.calc_latency = true;
 
           ImGui::TreePush ("");
-
-          static HMODULE hModScePad =
-            SK_GetModuleHandle (L"libscepad.dll");
-
-          if (hModScePad)
-          {
-            ImGui::Checkbox ("Hook libScePad", &config.input.gamepad.hook_scepad);
-
-            if (ImGui::IsItemHovered ())
-                ImGui::SetTooltip ("SONY's native input API; unlocks additional settings in games that use it");
-
-            if (config.input.gamepad.hook_scepad && last_scepad != 0)
-            {
-              ImGui::SameLine   (0.0f, 30);
-
-              ImGui::BeginGroup ();
-              ImGui::Checkbox   ("Disable Touchpad",             &config.input.gamepad.scepad.disable_touch);
-              ImGui::Checkbox   ("Use Share as Touchpad Click",  &config.input.gamepad.scepad.share_clicks_touch);
-              ImGui::EndGroup   ();
-
-              ImGui::SameLine   ();
-            }
-
-            else
-              ImGui::SameLine   (0.0f, 30);
-          }
 
           bool bBluetooth  = false;
           bool bDualSense  = false;
@@ -1468,12 +1437,12 @@ SK::ControlPanel::Input::Draw (void)
               {
                 ImGui::SetTooltip (
                   "Serial # %wc%wc:%wc%wc:%wc%wc:%wc%wc:%wc%wc:%wc%wc",
-                  ps_controller.wszSerialNumber [ 0], ps_controller.wszSerialNumber [ 1],
-                  ps_controller.wszSerialNumber [ 2], ps_controller.wszSerialNumber [ 3],
-                  ps_controller.wszSerialNumber [ 4], ps_controller.wszSerialNumber [ 5],
-                  ps_controller.wszSerialNumber [ 6], ps_controller.wszSerialNumber [ 7],
-                  ps_controller.wszSerialNumber [ 8], ps_controller.wszSerialNumber [ 9],
-                  ps_controller.wszSerialNumber [10], ps_controller.wszSerialNumber [11] );
+                  (unsigned short)ps_controller.wszSerialNumber [ 0], (unsigned short)ps_controller.wszSerialNumber [ 1],
+                  (unsigned short)ps_controller.wszSerialNumber [ 2], (unsigned short)ps_controller.wszSerialNumber [ 3],
+                  (unsigned short)ps_controller.wszSerialNumber [ 4], (unsigned short)ps_controller.wszSerialNumber [ 5],
+                  (unsigned short)ps_controller.wszSerialNumber [ 6], (unsigned short)ps_controller.wszSerialNumber [ 7],
+                  (unsigned short)ps_controller.wszSerialNumber [ 8], (unsigned short)ps_controller.wszSerialNumber [ 9],
+                  (unsigned short)ps_controller.wszSerialNumber [10], (unsigned short)ps_controller.wszSerialNumber [11] );
               }
             }
           }
@@ -1971,7 +1940,7 @@ SK::ControlPanel::Input::Draw (void)
           {
             ImGui::SameLine   ();
             ImGui::BulletText ( ICON_FA_BLUETOOTH
-              " Compatibility Mode: Features newer than DualShock 3 are unsupported."
+              " Compatibility Mode:   Features newer than DualShock 3 unsupported."
             );
 
             if (ImGui::IsItemHovered ( ))
@@ -2020,6 +1989,34 @@ SK::ControlPanel::Input::Draw (void)
 
         if (bHasDualSenseEdge || bHasDualShock4v2 || bHasDualShock4 || bHasBluetooth)
         {
+#if 0
+          static HMODULE hModScePad =
+            SK_GetModuleHandle (L"libscepad.dll");
+
+          if (hModScePad)
+          {
+            ImGui::Checkbox ("Hook libScePad", &config.input.gamepad.hook_scepad);
+
+            if (ImGui::IsItemHovered ())
+                ImGui::SetTooltip ("SONY's native input API; unlocks additional settings in games that use it");
+
+            if (config.input.gamepad.hook_scepad && last_scepad != 0)
+            {
+              ImGui::SameLine   (0.0f, 30);
+
+              ImGui::BeginGroup ();
+              ImGui::Checkbox   ("Disable Touchpad",             &config.input.gamepad.scepad.disable_touch);
+              ImGui::Checkbox   ("Use Share as Touchpad Click",  &config.input.gamepad.scepad.share_clicks_touch);
+              ImGui::EndGroup   ();
+
+              ImGui::SameLine   ();
+            }
+
+            else
+              ImGui::SameLine   (0.0f, 30);
+          }
+#endif
+
           ImGui::BeginGroup ();
           if (ImGui::TreeNode ("Compatibility Options"))
           {
@@ -2576,13 +2573,13 @@ extern float SK_ImGui_PulseNav_Strength;
         if (started)
         {
           ImGui::BeginGroup( );
-          ImGui::Text      ( "%lu Raw Samples - (Min | Max | Mean) - %4.2f ms | %4.2f ms | %4.2f ms",
+          ImGui::Text      ( "%i Raw Samples - (Min | Max | Mean) - %4.2f ms | %4.2f ms | %4.2f ms",
                                gamepad_stats->calcNumSamples (),
                                gamepad_stats->calcMin        (),
                                gamepad_stats->calcMax        (),
                                gamepad_stats->calcMean       () );
 
-          ImGui::Text      ( "%lu Validated Samples - (Min | Max | Mean) - %4.2f ms | %4.2f ms | %4.2f ms",
+          ImGui::Text      ( "%i Validated Samples - (Min | Max | Mean) - %4.2f ms | %4.2f ms | %4.2f ms",
                                gamepad_stats_filtered->calcNumSamples (),
                                gamepad_stats_filtered->calcMin        (),
                                gamepad_stats_filtered->calcMax        (),

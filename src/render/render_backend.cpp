@@ -797,13 +797,13 @@ SK_RenderBackend_V2::gsync_s::update (bool force)
 
       // We have a better solution for this now, that involves informing the
       //   user, rather than doing anything automatically...
-#if 0
+#if 1
       // Trigger AutoVRR because framerate limit is too high
       if (__target_fps > dVRROptimalFPS)
       {
         SK_RunOnce ({
           config.render.framerate.auto_low_latency.waiting = true;
-      
+
           update (true);
         });
       }
@@ -889,7 +889,7 @@ SK_RenderBackend_V2::gsync_s::update (bool force)
               monitor_caps.data.caps.currentlyCapableOfVRR;
           }
         } while ( WAIT_OBJECT_0 !=
-                  WaitForSingleObject (__SK_DLL_TeardownEvent, 750UL) );
+                  WaitForSingleObject (__SK_DLL_TeardownEvent, 1500UL) );
 
         SK_Thread_CloseSelf ();
 
@@ -2647,7 +2647,7 @@ SK_EDID_GetMonitorNameFromBlock ( uint8_t const* block )
 }
 
 std::string
-SK_RenderBackend_V2::parseEDIDForName (uint8_t *edid, size_t length) const
+SK_RenderBackend_V2::decodeEDIDForName (uint8_t *edid, size_t length) const
 {
   if (edid == nullptr)
     return "";
@@ -2751,7 +2751,7 @@ SK_RenderBackend_V2::parseEDIDForName (uint8_t *edid, size_t length) const
 }
 
 POINT
-SK_RenderBackend_V2::parseEDIDForNativeRes (uint8_t* edid, size_t length) const
+SK_RenderBackend_V2::decodeEDIDForNativeRes (uint8_t* edid, size_t length) const
 {
   if (edid == nullptr)
     return { 0, 0 };
@@ -2917,10 +2917,10 @@ SK_RBkEnd_UpdateMonitorName ( SK_RenderBackend_V2::output_s& display,
            )
         {
           edid_name =
-            rb.parseEDIDForName ( edid.EDID_Data, edid.sizeofEDID );
+            rb.decodeEDIDForName ( edid.EDID_Data, edid.sizeofEDID );
 
           auto nativeRes =
-            rb.parseEDIDForNativeRes ( edid.EDID_Data, edid.sizeofEDID );
+            rb.decodeEDIDForNativeRes ( edid.EDID_Data, edid.sizeofEDID );
 
           if (                      nativeRes.x != 0 &&
                                     nativeRes.y != 0 )
@@ -2996,10 +2996,10 @@ SK_RBkEnd_UpdateMonitorName ( SK_RenderBackend_V2::output_s& display,
             if (ERROR_SUCCESS == lStat)
             {
               edid_name =
-                rb.parseEDIDForName ( EDID_Data, edid_size );
+                rb.decodeEDIDForName ( EDID_Data, edid_size );
 
               auto nativeRes =
-                rb.parseEDIDForNativeRes ( EDID_Data, edid_size );
+                rb.decodeEDIDForNativeRes ( EDID_Data, edid_size );
 
               if (                      nativeRes.x != 0 &&
                                         nativeRes.y != 0 )
@@ -3772,6 +3772,19 @@ SK_RenderBackend_V2::updateOutputTopology (void)
 
             display.hdr.enabled       = outDesc1.ColorSpace ==
               DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
+
+            DXGI_OUTPUT_DESC              swap_out_desc = { };
+            SK_ComQIPtr <IDXGISwapChain4> pSwapChain4      (swapchain.p);
+            SK_ComPtr   <IDXGIOutput>     pSwapChainOutput;
+            if (pSwapChain4.p != nullptr && SUCCEEDED (pSwapChain4->GetContainingOutput (&pSwapChainOutput.p)))
+            {
+              pSwapChainOutput->GetDesc (&swap_out_desc);
+
+              if (swap_out_desc.Monitor == outDesc1.Monitor && display.hdr.enabled && config.render.dxgi.hdr_metadata_override == -1)
+              {
+                pSwapChain4->SetHDRMetaData (DXGI_HDR_METADATA_TYPE_NONE, 0, nullptr);
+              }
+            }
           }
         }
       }
@@ -4094,7 +4107,7 @@ SK_RenderBackend_V2::updateOutputTopology (void)
                  )
               {
                 edid_name =
-                  parseEDIDForName ( edid.EDID_Data, edid.sizeofEDID );
+                  decodeEDIDForName ( edid.EDID_Data, edid.sizeofEDID );
               }
 
               if (! edid_name.empty ())
@@ -4132,7 +4145,7 @@ SK_RenderBackend_V2::updateOutputTopology (void)
 
      display_crc [idx] =
              crc32c ( 0, &display,
-                          display_size );
+                          offsetof (SK_RenderBackend_V2::output_s, cache_end) - sizeof (SK_RenderBackend_V2::output_s::cache_end) );
 
     display_changed [idx] =
       old_crc != display_crc [idx];
@@ -4844,4 +4857,113 @@ SK_RenderBackend_V2::output_s::setSDRWhiteLevel (float fNits)
   }
 
   return false;
+}
+
+
+void
+SK_Render_CountVBlanks ()
+{
+  static HANDLE hVRREvent =
+    SK_CreateEvent (nullptr, FALSE, FALSE, nullptr);
+
+  static HANDLE hVBlankThread =
+    SK_Thread_CreateEx ([](LPVOID) -> DWORD
+    {
+      DXGI_FRAME_STATISTICS
+           frameStats = {};
+
+      auto& rb =
+        SK_GetCurrentRenderBackend ();
+
+      HANDLE                            vrr_events [] = { __SK_DLL_TeardownEvent, hVRREvent };
+      while (WaitForMultipleObjects (2, vrr_events, FALSE, 125) != WAIT_OBJECT_0)
+      {
+        SK_ComQIPtr <IDXGISwapChain> pSwapChain (rb.swapchain.p);
+        SK_ComPtr   <IDXGIOutput>    pOutput;
+
+        if (           pSwapChain.p != nullptr &&
+            SUCCEEDED (pSwapChain->GetContainingOutput (&pOutput.p)))
+        {
+          pSwapChain.Release ();
+
+          DwmFlush ();
+
+          pOutput->WaitForVBlank ();
+                       
+          if (pSwapChain = rb.swapchain.p;
+              pSwapChain.p != nullptr)
+              pSwapChain->GetFrameStatistics (&frameStats);
+        }              
+
+        if (pSwapChain.p != nullptr)
+        {
+          pSwapChain.Release ();
+
+          auto& nvapi_display =
+            rb.displays [rb.active_display].nvapi;
+          auto& stats =
+            rb.displays [rb.active_display].statistics;
+
+          const ULONGLONG& kSyncQPC =
+            (ULONGLONG &)frameStats.SyncQPCTime.QuadPart;
+
+          if (stats.vblank_counter.last_qpc_refreshed < kSyncQPC &&
+              stats.vblank_counter.addRecord (
+              nvapi_display.display_handle, &frameStats,        kSyncQPC))
+          {
+            stats.vblank_counter.last_qpc_refreshed =
+              kSyncQPC;
+          }
+        }
+
+        else if (sk::NVAPI::nv_hardware)
+        {
+          pSwapChain.Release ();
+
+          //
+          // Sample NVIDIA's VBlank counter from this thread, because that API
+          //   has massive performance penalties and this thread runs constantly
+          //     with little to no real workload.
+          //
+          auto& nvapi_display =
+            rb.displays [rb.active_display].nvapi;
+
+          auto& stats =
+            rb.displays [rb.active_display].statistics;
+
+          if (nvapi_display.display_handle != nullptr)
+          {
+            bool got_new_reading = false;
+
+            while (! got_new_reading)
+            {
+              const auto current_frame =
+                SK_GetFramesDrawn ();
+
+              if (stats.vblank_counter.last_frame_sampled < current_frame &&
+                  stats.vblank_counter.addRecord (
+                  nvapi_display.display_handle, nullptr, SK_QueryPerf ().QuadPart))
+              {
+                stats.vblank_counter.last_frame_sampled = current_frame;
+                got_new_reading = true;
+              }
+
+              else
+              {
+                if (WaitForSingleObject (__SK_DLL_TeardownEvent, 2) != WAIT_OBJECT_0)
+                  continue;
+
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      SK_Thread_CloseSelf ();
+
+      return 0;
+    }, L"[SK] VBlank Counter", nullptr);
+
+  SetEvent (hVRREvent);
 }

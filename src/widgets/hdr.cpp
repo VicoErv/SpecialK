@@ -144,11 +144,12 @@ struct SK_HDR_PQBoostParams
 } SK_HDR_PQBoost_v0 = { 0.5f, 30.0f, 11.5f, 1.500f, 1.0f,  570.0f },
   SK_HDR_PQBoost_v1 = { 0.5f,  1.0f,  0.1f, 1.273f, 0.5f,  267.0f };
 
-float __SK_HDR_ColorBoost = SK_HDR_PQBoost_v1.ColorBoost;
-float __SK_HDR_PQBoost0   = SK_HDR_PQBoost_v1.PQBoost0;
-float __SK_HDR_PQBoost1   = SK_HDR_PQBoost_v1.PQBoost1;
-float __SK_HDR_PQBoost2   = SK_HDR_PQBoost_v1.PQBoost2;
-float __SK_HDR_PQBoost3   = SK_HDR_PQBoost_v1.PQBoost3;
+bool  __SK_HDR_TonemapOverbright = true;
+float __SK_HDR_ColorBoost        = SK_HDR_PQBoost_v1.ColorBoost;
+float __SK_HDR_PQBoost0          = SK_HDR_PQBoost_v1.PQBoost0;
+float __SK_HDR_PQBoost1          = SK_HDR_PQBoost_v1.PQBoost1;
+float __SK_HDR_PQBoost2          = SK_HDR_PQBoost_v1.PQBoost2;
+float __SK_HDR_PQBoost3          = SK_HDR_PQBoost_v1.PQBoost3;
 
 
 #define MAX_HDR_PRESETS 4
@@ -168,11 +169,12 @@ struct SK_HDR_Preset_s {
     int tonemap = SK_HDR_TONEMAP_NONE;
   } colorspace;
 
-  float        pq_colorboost   = SK_HDR_PQBoost_v1.ColorBoost;
-  float        pq_boost0       = SK_HDR_PQBoost_v1.PQBoost0;
-  float        pq_boost1       = SK_HDR_PQBoost_v1.PQBoost1;
-  float        pq_boost2       = SK_HDR_PQBoost_v1.PQBoost2;
-  float        pq_boost3       = SK_HDR_PQBoost_v1.PQBoost3;
+  bool         tonemap_overbright = true;
+  float        pq_colorboost      = SK_HDR_PQBoost_v1.ColorBoost;
+  float        pq_boost0          = SK_HDR_PQBoost_v1.PQBoost0;
+  float        pq_boost1          = SK_HDR_PQBoost_v1.PQBoost1;
+  float        pq_boost2          = SK_HDR_PQBoost_v1.PQBoost2;
+  float        pq_boost3          = SK_HDR_PQBoost_v1.PQBoost3;
 
   std::wstring annotation = L"";
 
@@ -183,6 +185,7 @@ struct SK_HDR_Preset_s {
   sk::ParameterFloat*   cfg_gamut        = nullptr;
   sk::ParameterFloat*   cfg_middlegray   = nullptr;
   sk::ParameterInt*     cfg_tonemap      = nullptr;
+  sk::ParameterBool*    cfg_tonemap_ob   = nullptr;
 
   sk::ParameterFloat*   cfg_colorboost   = nullptr;
   sk::ParameterFloat*   cfg_pq_boost0    = nullptr;
@@ -203,19 +206,20 @@ struct SK_HDR_Preset_s {
     __SK_HDR_Preset =
       preset_idx;
 
-    __SK_HDR_Luma          = peak_white_nits;
-    __SK_HDR_PaperWhite    = paper_white_nits;
-    __SK_HDR_MiddleLuma    = middle_gray_nits / 1.0_Nits;
-    __SK_HDR_user_sdr_Y    = middle_gray_nits / 1.0_Nits;
-    __SK_HDR_Exp           = eotf;
-    __SK_HDR_Saturation    = saturation;
-    __SK_HDR_Gamut         = gamut;
-    __SK_HDR_tonemap       = colorspace.tonemap;
-    __SK_HDR_ColorBoost    = pq_colorboost;
-    __SK_HDR_PQBoost0      = pq_boost0;
-    __SK_HDR_PQBoost1      = pq_boost1;
-    __SK_HDR_PQBoost2      = pq_boost2;
-    __SK_HDR_PQBoost3      = pq_boost3;
+    __SK_HDR_Luma              = peak_white_nits;
+    __SK_HDR_PaperWhite        = paper_white_nits;
+    __SK_HDR_MiddleLuma        = middle_gray_nits / 1.0_Nits;
+    __SK_HDR_user_sdr_Y        = middle_gray_nits / 1.0_Nits;
+    __SK_HDR_Exp               = eotf;
+    __SK_HDR_Saturation        = saturation;
+    __SK_HDR_Gamut             = gamut;
+    __SK_HDR_tonemap           = colorspace.tonemap;
+    __SK_HDR_TonemapOverbright = tonemap_overbright;
+    __SK_HDR_ColorBoost        = pq_colorboost;
+    __SK_HDR_PQBoost0          = pq_boost0;
+    __SK_HDR_PQBoost1          = pq_boost1;
+    __SK_HDR_PQBoost2          = pq_boost2;
+    __SK_HDR_PQBoost3          = pq_boost3;
 
     if (_SK_HDR_ActivePreset != nullptr)
     {   _SK_HDR_ActivePreset->store (preset_idx);
@@ -292,6 +296,11 @@ struct SK_HDR_Preset_s {
                  SK_FormatStringW   (L"ColorBoost_[%lu]", preset_idx).c_str (),
                     pq_colorboost,   L"ColorBoost" );
 
+      cfg_tonemap_ob =
+        _CreateConfigParameterBool ( SK_HDR_SECTION,
+                 SK_FormatStringW   (L"TonemapOverbright_[%lu]", preset_idx).c_str (),
+               tonemap_overbright,   L"TonemapOverbright" );
+
       cfg_pq_boost0 =
         _CreateConfigParameterFloat ( SK_HDR_SECTION,
                  SK_FormatStringW   (L"PerceptualBoost0_[%lu]", preset_idx).c_str (),
@@ -330,14 +339,14 @@ struct SK_HDR_Preset_s {
       store ();
     }
   }
-} static hdr_presets  [4] = { { "HDR Preset 0", 0,  160.0_Nits,  80.0_Nits, 100.0_Nits, 0.955f, 1.0f, 0.020f, { SK_HDR_TONEMAP_NONE      }, SK_HDR_PQBoost_v1.ColorBoost,  SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F1" },
-                              { "HDR Preset 1", 1,   80.0_Nits,  80.0_Nits, 100.0_Nits, 0.920f, 1.0f, 0.015f, { SK_HDR_TONEMAP_NONE      }, SK_HDR_PQBoost_v0.ColorBoost,  SK_HDR_PQBoost_v0.PQBoost0, SK_HDR_PQBoost_v0.PQBoost1, SK_HDR_PQBoost_v0.PQBoost2, SK_HDR_PQBoost_v0.PQBoost3, L"Shift+F2" },
-                              { "scRGB Native", 2,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F3" },
-                              { "HDR10 Native", 3,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F4" } },
-         hdr_defaults [4] = { { "HDR Preset 0", 0,  160.0_Nits,  80.0_Nits, 100.0_Nits, 0.955f, 1.0f, 0.020f, { SK_HDR_TONEMAP_NONE      }, SK_HDR_PQBoost_v1.ColorBoost,  SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F1" },
-                              { "HDR Preset 1", 1,   80.0_Nits,  80.0_Nits, 100.0_Nits, 0.920f, 1.0f, 0.015f, { SK_HDR_TONEMAP_NONE      }, SK_HDR_PQBoost_v0.ColorBoost,  SK_HDR_PQBoost_v0.PQBoost0, SK_HDR_PQBoost_v0.PQBoost1, SK_HDR_PQBoost_v0.PQBoost2, SK_HDR_PQBoost_v0.PQBoost3, L"Shift+F2" },
-                              { "scRGB Native", 2,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F3" },
-                              { "HDR10 Native", 3,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F4" } };
+} static hdr_presets  [4] = { { "HDR Preset 0", 0,  160.0_Nits,  80.0_Nits, 100.0_Nits, 0.955f, 1.0f, 0.020f, { SK_HDR_TONEMAP_NONE      }, true, SK_HDR_PQBoost_v1.ColorBoost,  SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F1" },
+                              { "HDR Preset 1", 1,   80.0_Nits,  80.0_Nits, 100.0_Nits, 0.920f, 1.0f, 0.015f, { SK_HDR_TONEMAP_NONE      }, true, SK_HDR_PQBoost_v0.ColorBoost,  SK_HDR_PQBoost_v0.PQBoost0, SK_HDR_PQBoost_v0.PQBoost1, SK_HDR_PQBoost_v0.PQBoost2, SK_HDR_PQBoost_v0.PQBoost3, L"Shift+F2" },
+                              { "scRGB Native", 2,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, true, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F3" },
+                              { "HDR10 Native", 3,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, true, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F4" } },
+         hdr_defaults [4] = { { "HDR Preset 0", 0,  160.0_Nits,  80.0_Nits, 100.0_Nits, 0.955f, 1.0f, 0.020f, { SK_HDR_TONEMAP_NONE      }, true, SK_HDR_PQBoost_v1.ColorBoost,  SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F1" },
+                              { "HDR Preset 1", 1,   80.0_Nits,  80.0_Nits, 100.0_Nits, 0.920f, 1.0f, 0.015f, { SK_HDR_TONEMAP_NONE      }, true, SK_HDR_PQBoost_v0.ColorBoost,  SK_HDR_PQBoost_v0.PQBoost0, SK_HDR_PQBoost_v0.PQBoost1, SK_HDR_PQBoost_v0.PQBoost2, SK_HDR_PQBoost_v0.PQBoost3, L"Shift+F2" },
+                              { "scRGB Native", 2,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, true, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F3" },
+                              { "HDR10 Native", 3,   80.0_Nits,  80.0_Nits, 100.0_Nits, 1.000f, 1.0f, 0.000f, { SK_HDR_TONEMAP_RAW_IMAGE }, true, SK_HDR_PQBoost_v1.ColorBoost, -SK_HDR_PQBoost_v1.PQBoost0, SK_HDR_PQBoost_v1.PQBoost1, SK_HDR_PQBoost_v1.PQBoost2, SK_HDR_PQBoost_v1.PQBoost3, L"Shift+F4" } };
 
 BOOL
 CALLBACK
@@ -368,139 +377,6 @@ SK_HDR_KeyPress ( BOOL Control,
 
   return FALSE;
 }
-
-// PQ ST.2048 max value
-// 1.0 = 100nits, 100.0 = 10knits
-#define DEFAULT_MAX_PQ 100.0
-
-struct float3 {
-public:
-  float3 (float x_, float y_, float z_)
-  {
-    x = x_; y = y_; z = z_;
-  };
-
-  union {
-    float xyz [3];
-    float x, y, z;
-    float r, g, b;
-  };
-
-  float& operator [](int i) { return xyz [i]; }
-};
-
-static const float3 sdr_full_white = { 1.0f, 1.0f, 1.0f };
-
-struct ParamsPQ
-{
-  float N, M;
-  float C1, C2, C3;
-};
-
-static const ParamsPQ PQ =
-{
-  2610.0 / 4096.0 / 4.0,   // N
-  2523.0 / 4096.0 * 128.0, // M
-  3424.0 / 4096.0,         // C1
-  2413.0 / 4096.0 * 32.0,  // C2
-  2392.0 / 4096.0 * 32.0,  // C3
-};
-
-float rcp (float v)
-{
-  return
-    1.0f / v;
-};
-
-float3 rcp (float3 v)
-{
-  return
-    float3 ( rcp (v.x),
-             rcp (v.y),
-             rcp (v.z) );
-};
-
-// PositivePow remove this warning when you know the value is positive and avoid inf/NAN.
-float PositivePow (float base, float power)
-{
-  return
-    pow ( std::max (abs (base), float (FLT_EPSILON)), power );
-}
-
-float3 PositivePow (float3 base, float3 power)
-{
-  return
-    float3 (
-      std::pow (std::max (std::abs (base.x), FLT_EPSILON), power.x),
-      std::pow (std::max (std::abs (base.y), FLT_EPSILON), power.y),
-      std::pow (std::max (std::abs (base.z), FLT_EPSILON), power.z)
-    );
-}
-
-float3 PositivePow (float3 base, float power)
-{
-  return
-    PositivePow (base, float3 (power, power, power));
-}
-
-float3 LinearToPQ (float3 x);
-float3 LinearToPQ (float3 x, float maxPQValue)
-{
-  x =
-    PositivePow ( float3 (x [0] / maxPQValue,
-                          x [1] / maxPQValue,
-                          x [2] / maxPQValue),
-                  float3 (PQ.N,
-                          PQ.N,
-                          PQ.N) );
-  
-  float3 nd =
-    float3 (
-      (PQ.C1 + PQ.C2 * x.x) /
-       (1.0f + PQ.C3 * x.x),
-      (PQ.C1 + PQ.C2 * x.y) /
-       (1.0f + PQ.C3 * x.y),
-      (PQ.C1 + PQ.C2 * x.z) /
-       (1.0f + PQ.C3 * x.z)
-    );
-
-  return
-    PositivePow (nd, PQ.M);
-}
-
-float3 LinearToPQ (float3 x)
-{
-  return
-    LinearToPQ (x, DEFAULT_MAX_PQ);
-}
-
-float3 PQToLinear (float3 v, float maxPQValue)
-{
-  v =
-    PositivePow (v, rcp (PQ.M));
-
-  float3 nd =
-    float3 (
-      std::max (v.x - PQ.C1, 0.0f) /
-                     (PQ.C2 - (PQ.C3 * v.x)),
-      std::max (v.y - PQ.C1, 0.0f) /
-                     (PQ.C2 - (PQ.C3 * v.z)),
-      std::max (v.z - PQ.C1, 0.0f) /
-                     (PQ.C2 - (PQ.C3 * v.z))
-    );
-
-  return
-    float3 (PositivePow (nd.x, rcp (PQ.N)) * maxPQValue,
-            PositivePow (nd.y, rcp (PQ.N)) * maxPQValue,
-            PositivePow (nd.z, rcp (PQ.N)) * maxPQValue);
-}
-
-float3 PQToLinear (float3 x)
-{
-  return
-    PQToLinear (x, DEFAULT_MAX_PQ);
-}
-
 
 std::wstring
 SK_Display_GetDeviceNameAndGUID (const wchar_t *wszPathName)
@@ -994,7 +870,7 @@ public:
                __SK_HDR_16BitSwap )
           {
             __SK_HDR_Content_EOTF            = 1.0f;
-            config.render.dxgi.srgb_behavior = 0;
+            config.render.dxgi.srgb_behavior = 1;
 
             _SK_HDR_ContentEOTF->store (__SK_HDR_Content_EOTF);
           }
@@ -1050,7 +926,8 @@ public:
 
     // Games where 8-bit Compute Remastering has problems
     //
-    if (SK_GetCurrentGameID () == SK_GAME_ID::HaroldHalibut)
+    if (SK_GetCurrentGameID () == SK_GAME_ID::HaroldHalibut ||
+        SK_GetCurrentGameID () == SK_GAME_ID::Metaphor)
       SK_HDR_UnorderedViews_8bpc->PromoteTo16Bit = false;
 
     _SK_HDR_FullRange =
@@ -1267,7 +1144,7 @@ public:
             ImGui::Text       ("Very slight performance boost vs. scRGB on low-end GPUs and DLSS Frame Generation");
             ImGui::Separator  ();
             ImGui::BulletText ("This mode is much newer to SK than scRGB, and may not work in all games.");
-            ImGui::BulletText ("SK's UI Luminance setting is inaccurate in HDR10; ignore nits values and use whatever looks best.");
+            ImGui::BulletText ("SK's Alpha Transparency is Less Effective in HDR10; ignore nits values and use whatever looks best.");
           }
           ImGui::EndTooltip ();
         }
@@ -1314,6 +1191,31 @@ public:
           }
         }
 
+        // Swap presets when changing between scRGB and HDR10 native
+        if (__SK_HDR_Preset == 3 && __SK_HDR_16BitSwap)
+        {
+          __SK_HDR_Preset = 2;
+          hdr_presets [__SK_HDR_Preset].cfg_tonemap->set_value (SK_HDR_TONEMAP_HDR10_PASSTHROUGH);
+        }
+
+        else if (__SK_HDR_Preset == 2 && __SK_HDR_10BitSwap)
+        {
+          __SK_HDR_Preset = 3;
+          hdr_presets [__SK_HDR_Preset].cfg_tonemap->set_value (SK_HDR_TONEMAP_RAW_IMAGE);
+        }
+
+        auto& preset =
+          hdr_presets [__SK_HDR_Preset];
+
+        if (preset.cfg_nits->get_value () == 1.0f)
+        {
+          preset.peak_white_nits = 0.99999f;
+          preset.cfg_nits->set_value (preset.peak_white_nits);
+
+          preset.activate ();
+          preset.store    ();
+        }
+
         config.utility.save_async ();
 
         SK_ComQIPtr <IDXGISwapChain3> pSwapChain (rb.swapchain);
@@ -1350,10 +1252,10 @@ public:
       }
     }
 
-    static const bool bStreamline =
+    static const bool bStreamlineDLSSG =
       SK_IsModuleLoaded (L"sl.dlss_g.dll");
 
-    if (bStreamline && ImGui::IsItemHovered ())
+    if (bStreamlineDLSSG && ImGui::IsItemHovered ())
     {
       ImGui::BeginTooltip      ( );
       {
@@ -1508,24 +1410,39 @@ public:
 
         auto constexpr _DLSSG_FRAME_THRESHOLD { 8 };
 
+        static char szClockRate [16] = { };
+
+        uint32_t clocks_khz =
+          SK_GPU_GetClockRateInkHz (0);
+
+        if (clocks_khz <= 0)
+          *szClockRate = '\0';
+        else
+        {
+          snprintf (
+            szClockRate, 15, " @ %4.2f GHz",
+              static_cast <double> (clocks_khz) / 1000000
+          );
+        }
+
         static char   szProcessingText [128] = { };
         static const char* string_format [ ] = {
-          "Format Conversion Passes:\t%u\t\tDLSS3 Format Conversion:\t%5.4f ms\t\tHDR Processing:\t%5.4f ms",
-                                           "DLSS3 Format Conversion:\t%5.4f ms\t\tHDR Processing:\t%5.4f ms",
-                                                "Format Conversion Passes:\t%u\t\tHDR Processing:\t%5.4f ms",
-                                                                                 "HDR Processing:\t%5.4f ms",
-                                                           "HDR Zero-Copy Mode\t\tHDR Processing:\t%5.4f ms"
+          "Format Conversion Passes:\t%u\t\tDLSS3 Format Conversion:\t%5.4f ms\t\tHDR Processing:\t%5.4f ms%hs",
+                                           "DLSS3 Format Conversion:\t%5.4f ms\t\tHDR Processing:\t%5.4f ms%hs",
+                                                "Format Conversion Passes:\t%u\t\tHDR Processing:\t%5.4f ms%hs",
+                                                                                 "HDR Processing:\t%5.4f ms%hs",
+                                                           "HDR Zero-Copy Mode\t\tHDR Processing:\t%5.4f ms%hs"
         };
 
         if (dComputeCopyTime != 0.0 && computeCopy.lastFrameActive > SK_GetFramesDrawn () - _DLSSG_FRAME_THRESHOLD)
         { if (                                                     format_conversions > 0)
-               snprintf (szProcessingText, 127, string_format [0], format_conversions, dComputeCopyTime, SK_D3D11_HDR_RuntimeMs);
-          else snprintf (szProcessingText, 127, string_format [1],                     dComputeCopyTime, SK_D3D11_HDR_RuntimeMs);
+               snprintf (szProcessingText, 127, string_format [0], format_conversions, dComputeCopyTime, SK_D3D11_HDR_RuntimeMs, szClockRate);
+          else snprintf (szProcessingText, 127, string_format [1],                     dComputeCopyTime, SK_D3D11_HDR_RuntimeMs, szClockRate);
         } else { if (                                              format_conversions > 0)
-               snprintf (szProcessingText, 127, string_format [2], format_conversions,                   SK_D3D11_HDR_RuntimeMs);
-          else snprintf (szProcessingText, 127, string_format [3],                                       SK_D3D11_HDR_RuntimeMs);
+               snprintf (szProcessingText, 127, string_format [2], format_conversions,                   SK_D3D11_HDR_RuntimeMs, szClockRate);
+          else snprintf (szProcessingText, 127, string_format [3],                                       SK_D3D11_HDR_RuntimeMs, szClockRate);
           if (SK_D3D11_HDR_ZeroCopy)
-               snprintf (szProcessingText, 127, string_format [4],                                       SK_D3D11_HDR_RuntimeMs);
+               snprintf (szProcessingText, 127, string_format [4],                                       SK_D3D11_HDR_RuntimeMs, szClockRate);
 
           dComputeCopyTime = 0.0;
         }
@@ -1862,27 +1779,6 @@ public:
 
             else
             {
-#if 0
-              float3 pq_color =
-                LinearToPQ ( sdr_full_white, preset.pq_boost0 );
-
-              pq_color.x *= preset.pq_boost2;
-              pq_color.y *= preset.pq_boost2;
-              pq_color.z *= preset.pq_boost2;
-
-              float3 new_color =
-                PQToLinear (pq_color, preset.pq_boost1);
-
-              new_color.x /= preset.pq_boost3;
-              new_color.y /= preset.pq_boost3;
-              new_color.z /= preset.pq_boost3;
-
-              float
-                peak_adjusted =
-                  std::max ( new_color.x,
-                  std::max ( new_color.y,
-                             new_color.z ) );
-#endif
               peak_nits /= 80.0f;
 
               bool bDefaultPB_v0 =
@@ -2070,6 +1966,12 @@ public:
                   preset.colorspace.tonemap = SK_HDR_TONEMAP_NONE;
                   preset.eotf               = 1.0f;
 
+                  if (preset.cfg_nits->get_value () == 1.0f)
+                  {
+                    preset.peak_white_nits = 0.99999f;
+                    preset.cfg_nits->set_value (preset.peak_white_nits);
+                  }
+
                   preset.activate ();
                   preset.store    ();
                 }
@@ -2080,6 +1982,12 @@ public:
 
                   preset.colorspace.tonemap = SK_HDR_TONEMAP_HDR10_PASSTHROUGH;
                   preset.eotf               = 1.0f;
+
+                  if (preset.cfg_nits->get_value () == 1.0f)
+                  {
+                    preset.peak_white_nits = 0.99999f;
+                    preset.cfg_nits->set_value (preset.peak_white_nits);
+                  }
 
                   preset.activate ();
                   preset.store    ();
@@ -2229,10 +2137,10 @@ public:
 
             sec.add_key_value (
               SK_FormatStringW (L"scRGBLuminance_[%lu]", __SK_HDR_Preset),
-                                                 std::to_wstring (preset.peak_white_nits) );
+                                             std::to_wstring (preset.peak_white_nits) );
             sec.add_key_value (
               SK_FormatStringW (L"scRGBPaperWhite_[%lu]", __SK_HDR_Preset),
-                                                  std::to_wstring (preset.paper_white_nits) );
+                                             std::to_wstring (preset.paper_white_nits) );
             sec.add_key_value (
               SK_FormatStringW (L"scRGBGamma_[%lu]", __SK_HDR_Preset),
                                              std::to_wstring (preset.eotf) );
@@ -2377,6 +2285,7 @@ public:
             preset.cfg_saturation->load   (preset.saturation);
             preset.cfg_gamut->load        (preset.gamut);
             preset.cfg_tonemap->load      (preset.colorspace.tonemap);
+            preset.cfg_tonemap_ob->load   (preset.tonemap_overbright);
 
             preset.cfg_colorboost->load   (preset.pq_colorboost);
             preset.cfg_pq_boost0->load    (preset.pq_boost0);
@@ -2444,8 +2353,22 @@ public:
 
             const bool pboost = (preset.pq_boost0 > 0.0f);
 
+            if (abs (__SK_HDR_Luma) >= 1.0f)
+            {
+              if (ImGui::Checkbox ("Tonemap Overbright Bits", &preset.tonemap_overbright))
+              {
+                preset.cfg_tonemap_ob->store (preset.tonemap_overbright);
+                __SK_HDR_TonemapOverbright =  preset.tonemap_overbright;
+
+                config.utility.save_async ();
+              }
+            }
+
             if (pboost)
             {
+              if (abs (__SK_HDR_Luma) >= 1.0f)
+                ImGui::SameLine ();
+
               float colorboost =
                 100.0f * preset.pq_colorboost;
 
@@ -2709,15 +2632,23 @@ public:
                   }
                 }
 
+                static bool bShowDebug = false;
+
+                if (ImGui::IsItemClicked (ImGuiMouseButton_Right))
+                  bShowDebug = true;
+
 #if 0
-                extern UINT filterFlags;
-                ImGui::InputInt ("Filter Flags", (int *)&filterFlags, 1, 100, ImGuiInputTextFlags_CharsHexadecimal);
+                if (bShowDebug)
+                {
+                  extern UINT filterFlags;
+                  ImGui::InputInt ("Filter Flags", (int *)&filterFlags, 1, 100, ImGuiInputTextFlags_CharsHexadecimal);
 
-                extern float _cSdrPower;
-                extern float _cLerpScale;
+                  extern float _cSdrPower;
+                  extern float _cLerpScale;
 
-                ImGui::InputFloat ("Sdr Power",  &_cSdrPower);
-                ImGui::InputFloat ("Lerp Scale", &_cLerpScale);
+                  ImGui::InputFloat ("Sdr Power",  &_cSdrPower);
+                  ImGui::InputFloat ("Lerp Scale", &_cLerpScale);
+                }
 #endif
 
                 ImGui::EndGroup ();

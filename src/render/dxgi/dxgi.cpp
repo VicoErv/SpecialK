@@ -52,6 +52,10 @@
 #include <CoreWindow.h>
 #include <VersionHelpers.h>
 
+#undef IMGUI_VERSION_NUM
+#include <ReShade/reshade.hpp>
+#include <ReShade/reshade_api.hpp>
+
 BOOL _NO_ALLOW_MODE_SWITCH = FALSE;
 DXGI_SWAP_CHAIN_DESC  _ORIGINAL_SWAP_CHAIN_DESC = { };
 DXGI_SWAP_CHAIN_DESC1 _ORIGINAL_SWAP_CHAIN_DESC1 = { };
@@ -453,10 +457,20 @@ SK_DXGI_PickHDRFormat ( DXGI_FORMAT fmt_orig, BOOL bWindowed,
 
   // Hack to prevent NV's Vulkan/DXGI Interop SwapChain from destroying itself
   //   if HDR is not enabled.
-  if (config.apis.NvAPI.vulkan_bridge == 1 && GetModuleHandle (L"vulkan-1.dll"))
+  if (sk::NVAPI::nv_hardware && config.apis.NvAPI.vulkan_bridge == 1 && GetModuleHandle (L"vulkan-1.dll"))
   {
-    TenBitSwap                       = true;
-    config.render.output.force_10bpc = true;
+    // In case we are on a system with both AMD and NV GPUs, check
+    //   for AMD's Vulkan layer as an indication to bail-out
+    const bool bIsAMD =
+      SK_IsModuleLoaded (
+        SK_RunLHIfBitness (64, L"amdvlk64.dll",
+                               L"amdvlk32.dll"));
+
+    if (! bIsAMD)
+    {
+      TenBitSwap                       = true;
+      config.render.output.force_10bpc = true;
+    }
   }
 
   DXGI_FORMAT fmt_new = fmt_orig;
@@ -546,10 +560,23 @@ DWORD dwRenderThread = 0x0000;
 
 static volatile LONG __dxgi_ready = FALSE;
 
-void WaitForInitDXGI (void)
+bool WaitForInitDXGI (DWORD dwTimeout)
 {
-  // This is a hybrid spin; it will spin for up to 250 iterations before sleeping
-  SK_Thread_SpinUntilFlagged (&__dxgi_ready);
+  // Waiting while Streamline has plugins loaded would deadlock us in local injection
+  if (SK_IsModuleLoaded (L"sl.common.dll"))
+  {
+    SK_Thread_SpinUntilFlaggedEx (&__dxgi_ready, 250UL);
+  }
+
+  else
+  {
+    if (dwTimeout != INFINITE)
+         SK_Thread_SpinUntilFlaggedEx (&__dxgi_ready, dwTimeout);
+    else SK_Thread_SpinUntilFlagged   (&__dxgi_ready);
+  }
+
+  return
+    ReadAcquire (&__dxgi_ready);
 }
 
 DWORD __stdcall HookDXGI (LPVOID user);
@@ -1105,6 +1132,8 @@ SK_GetDXGIFactoryInterfaceVer (gsl::not_null <IUnknown *> pFactory)
     dxgi_caps.swapchain.allow_tearing =
       SUCCEEDED (hr) && dxgi_caps.swapchain.allow_tearing;
 
+    dxgi_caps.init.store (true);
+
     return 7;
   }
 
@@ -1126,6 +1155,8 @@ SK_GetDXGIFactoryInterfaceVer (gsl::not_null <IUnknown *> pFactory)
 
     dxgi_caps.swapchain.allow_tearing =
       SUCCEEDED (hr) && dxgi_caps.swapchain.allow_tearing;
+
+    dxgi_caps.init.store (true);
 
     return 6;
   }
@@ -1149,6 +1180,8 @@ SK_GetDXGIFactoryInterfaceVer (gsl::not_null <IUnknown *> pFactory)
     dxgi_caps.swapchain.allow_tearing =
       SUCCEEDED (hr) && dxgi_caps.swapchain.allow_tearing;
 
+    dxgi_caps.init.store (true);
+
     return 5;
   }
 
@@ -1160,6 +1193,9 @@ SK_GetDXGIFactoryInterfaceVer (gsl::not_null <IUnknown *> pFactory)
     dxgi_caps.present.flip_sequential = true;
     dxgi_caps.present.waitable        = true;
     dxgi_caps.present.flip_discard    = true;
+    
+    dxgi_caps.init.store (true);
+
     return 4;
   }
 
@@ -1170,6 +1206,9 @@ SK_GetDXGIFactoryInterfaceVer (gsl::not_null <IUnknown *> pFactory)
     dxgi_caps.device.latency_control  = true;
     dxgi_caps.present.flip_sequential = true;
     dxgi_caps.present.waitable        = true;
+
+    dxgi_caps.init.store (true);
+
     return 3;
   }
 
@@ -1179,6 +1218,9 @@ SK_GetDXGIFactoryInterfaceVer (gsl::not_null <IUnknown *> pFactory)
     dxgi_caps.device.enqueue_event    = true;
     dxgi_caps.device.latency_control  = true;
     dxgi_caps.present.flip_sequential = true;
+
+    dxgi_caps.init.store (true);
+
     return 2;
   }
 
@@ -1186,12 +1228,17 @@ SK_GetDXGIFactoryInterfaceVer (gsl::not_null <IUnknown *> pFactory)
     pFactory->QueryInterface <IDXGIFactory1> ((IDXGIFactory1 **)(void **)&pTemp)))
   {
     dxgi_caps.device.latency_control  = true;
+
+    dxgi_caps.init.store (true);
+
     return 1;
   }
 
   if (SUCCEEDED (
     pFactory->QueryInterface <IDXGIFactory> ((IDXGIFactory **)(void **)&pTemp)))
   {
+    dxgi_caps.init.store (true);
+
     return 0;
   }
 
@@ -1435,7 +1482,7 @@ SK_DXGI_UpdateColorSpace (IDXGISwapChain3* This, DXGI_OUTPUT_DESC1 *outDesc)
 
         DXGI_HDR_METADATA_HDR10 hdr10   = { };
 
-        hdr10.MinMasteringLuminance     = sk::narrow_cast <UINT>   (rb.display_gamut.minY / 0.0001);
+        hdr10.MinMasteringLuminance     = sk::narrow_cast <UINT>   (0);//rb.display_gamut.minY / 0.0001);
         hdr10.MaxMasteringLuminance     = sk::narrow_cast <UINT>   (rb.display_gamut.maxY);
         hdr10.MaxContentLightLevel      = sk::narrow_cast <UINT16> (rb.display_gamut.maxLocalY);
         hdr10.MaxFrameAverageLightLevel = sk::narrow_cast <UINT16> (rb.display_gamut.maxAverageY);
@@ -1843,6 +1890,23 @@ SK_D3D11_InsertDuplicateFrame (int MakeBreak = 0)
   return E_UNEXPECTED;
 }
 
+// NVIDIA-only feature for now
+//
+void
+SK_Framerate_AutoVRRCheckpoint (void)
+{
+  if (sk::NVAPI::nv_hardware)
+  {
+    // PresentMon is needed to handle these two cases
+    if ((config.render.framerate.auto_low_latency.waiting) ||
+        (config.render.framerate.auto_low_latency.triggered && config.render.framerate.auto_low_latency.policy.auto_reapply))
+    {
+      extern void SK_SpawnPresentMonWorker (void);
+      SK_RunOnce (SK_SpawnPresentMonWorker (); config.apis.NvAPI.implicit_gsync = true;);
+    }
+  }
+}
+
 void
 SK_D3D11_PostPresent (ID3D11Device* pDev, IDXGISwapChain* pSwap, HRESULT hr)
 {
@@ -1854,8 +1918,8 @@ SK_D3D11_PostPresent (ID3D11Device* pDev, IDXGISwapChain* pSwap, HRESULT hr)
     UINT currentBuffer = 0;
 
     bool __WantGSyncUpdate =
-      ( (config.fps.show && config.osd.show ) || SK_ImGui_Visible || std::exchange (config.apis.NvAPI.implicit_gsync, false) || (SK_GetFramesDrawn () < 120 && config.render.framerate.auto_low_latency.waiting) )
-                         && ReadAcquire (&__SK_NVAPI_UpdateGSync) != 0;
+      ( (config.fps.show && config.osd.show ) || SK_ImGui_Visible || config.apis.NvAPI.implicit_gsync || config.render.framerate.auto_low_latency.waiting ) &&
+                                                                 ReadAcquire (&__SK_NVAPI_UpdateGSync) != 0;
 
     if (__WantGSyncUpdate)
     {
@@ -1875,6 +1939,7 @@ SK_D3D11_PostPresent (ID3D11Device* pDev, IDXGISwapChain* pSwap, HRESULT hr)
         {
           rb.gsync_state.update ();
           InterlockedExchange (&__SK_NVAPI_UpdateGSync, FALSE);
+                      config.apis.NvAPI.implicit_gsync = false;
         }
 
         else rb.surface.dxgi = nullptr;
@@ -1886,6 +1951,8 @@ SK_D3D11_PostPresent (ID3D11Device* pDev, IDXGISwapChain* pSwap, HRESULT hr)
     SK_Screenshot_ProcessQueue  (SK_ScreenshotStage::ClipboardOnly, rb);
     SK_Screenshot_ProcessQueue  (SK_ScreenshotStage::_FlushQueue,   rb);
     SK_D3D11_TexCacheCheckpoint (                                     );
+
+    SK_Framerate_AutoVRRCheckpoint ();
 
     if (__SK_BFI)
     {
@@ -1912,6 +1979,8 @@ SK_D3D12_PostPresent (ID3D12Device* pDev, IDXGISwapChain* pSwap, HRESULT hr)
     SK_Screenshot_ProcessQueue  (SK_ScreenshotStage::EndOfFrame,    rb);
     SK_Screenshot_ProcessQueue  (SK_ScreenshotStage::ClipboardOnly, rb);
     SK_Screenshot_ProcessQueue  (SK_ScreenshotStage::_FlushQueue,   rb);
+
+    SK_Framerate_AutoVRRCheckpoint ();
   }
 }
 
@@ -2068,7 +2137,7 @@ SK_ImGui_DrawD3D11 (IDXGISwapChain* This)
       This->GetDesc (&swapDesc);
 
       if (IsWindow (swapDesc.OutputWindow) &&
-                    swapDesc.OutputWindow != 0)
+                    swapDesc.OutputWindow != game_window.hWnd)
       {
         SK_RunOnce (SK_InstallWindowHook (swapDesc.OutputWindow));
       }
@@ -2369,6 +2438,12 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
   SK_RenderBackend& rb =
     SK_GetCurrentRenderBackend ();
 
+  const auto& display =
+    rb.displays [rb.active_display];
+
+  const bool bDLSS3OnVRRDisplay =
+    (__SK_IsDLSSGActive && display.nvapi.vrr_enabled);
+
   auto _Present = [&](UINT _SyncInterval,
                       UINT _Flags) ->
   HRESULT
@@ -2377,7 +2452,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
          config.render.framerate.target_fps_bg < rb.getActiveRefreshRate () / 2.0f &&
          (! SK_IsGameWindowActive ()) )
     {
-      if ( SK_GetFramesDrawn () > 30 && rb.displays [rb.active_display].nvapi.vrr_enabled &&
+      if ( SK_GetFramesDrawn () > 30 && display.nvapi.vrr_enabled &&
            ( config.window.background_render ||
              config.window.always_on_top == SmartAlwaysOnTop ) )
       {
@@ -2442,6 +2517,13 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
         // Remove this flag
         _Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
       }
+    
+      // Turn tearing off when using frame generation
+      if (bDLSS3OnVRRDisplay)
+      {
+        _Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
+        _SyncInterval = 0;
+      }
     }
 
     // Only works in Fullscreen
@@ -2465,7 +2547,7 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
         _d3d12_rbk->release (This);
       }
 
-      if ( ret != S_OK && (! rb.active_traits.bOriginallyFlip) && SK_GetCurrentRenderBackend ().api != SK_RenderAPI::D3D12 )
+      if ( ret != S_OK && (! rb.active_traits.bOriginallyFlip) && rb.api != SK_RenderAPI::D3D12 )
       {
         // This would recurse infinitely without the ghetto lock
         //
@@ -2577,8 +2659,8 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       );
     };
 
-  if (! config.render.dxgi.allow_tearing)
-  {
+  if ((! config.render.dxgi.allow_tearing) || bDLSS3OnVRRDisplay)
+  {                                           // Turn tearing off when using frame generation
     if (Flags & DXGI_PRESENT_ALLOW_TEARING)
     {
       SK_RunOnce (
@@ -2586,6 +2668,11 @@ SK_DXGI_PresentBase ( IDXGISwapChain         *This,
       );
 
       Flags &= ~DXGI_PRESENT_ALLOW_TEARING;
+    }
+
+    if (bDLSS3OnVRRDisplay)
+    {
+      SyncInterval = 0;
     }
   }
 
@@ -4467,6 +4554,9 @@ DXGISwap3_ResizeBuffers1_Override (IDXGISwapChain3* This,
 HRESULT
 SK_DXGI_GetDebugInterface (REFIID riid, void **ppDebug)
 {
+  if (ppDebug == nullptr)
+    return ERROR_INVALID_PARAMETER;
+
   static HMODULE hModDXGIDebug =
     LoadLibraryExW ( L"dxgidebug.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32 );
 
@@ -4651,6 +4741,36 @@ SK_DXGI_CreateSwapChain_PreInit (
     rb.active_traits.bFlipMode =
       dxgi_caps.present.flip_sequential;
   }
+
+
+  // Use Flip Sequential if ReShade is present, so that screenshots
+  //   work as expected...
+  static bool 
+        bHasReShade = reshade::internal::get_reshade_module_handle (nullptr);
+  if (! bHasReShade)
+  {
+    SK_RunOnce (
+    {
+      for (auto& import : imports->imports)
+      {
+        if ( StrStrIW (                      import.name.c_str (), L"ReShade")
+                   || (import.filename != nullptr              &&
+             StrStrIW (import.filename->get_value_str ().c_str (), L"ReShade")) )
+        {
+          bHasReShade = true;
+          break;
+        }
+      }
+    });
+  }
+
+  const DXGI_SWAP_EFFECT
+    original_swap_effect =
+      pDesc  != nullptr  ? pDesc ->SwapEffect :
+      pDesc1 != nullptr  ? pDesc1->SwapEffect :
+        DXGI_SWAP_EFFECT_DISCARD;
+
+
 
   auto _DescribeSwapChain = [&](const wchar_t* wszLabel) noexcept -> void
   {
@@ -5040,24 +5160,24 @@ SK_DXGI_CreateSwapChain_PreInit (
           case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
             SK_LOGs0 ( L" DXGI 1.2 ",
                        L" >> sRGB (B8G8R8A8) Override Required to Enable Flip Model" );
-            rb.srgb_stripped                  = true;
-            rb.active_traits.bOriginallysRGB  = true;
-            [[fallthrough]];
+            rb.srgb_stripped                 = true;
+            rb.active_traits.bOriginallysRGB = true;
+            pDesc->BufferDesc.Format         = DXGI_FORMAT_R10G10B10A2_UNORM;
+            break;//[[fallthrough]];
           case DXGI_FORMAT_B8G8R8A8_UNORM:
-          case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+          case DXGI_FORMAT_B8G8R8A8_TYPELESS: // WTF? Should be typed...
             pDesc->BufferDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
             break;
           case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
-            pDesc->BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-
             SK_LOGs0 ( L" DXGI 1.2 ",
                        L" >> sRGB (R8G8B8A8) Override Required to Enable Flip Model" );
 
             rb.srgb_stripped                 = true;
             rb.active_traits.bOriginallysRGB = true;
-            [[fallthrough]];
+            pDesc->BufferDesc.Format         = DXGI_FORMAT_R10G10B10A2_UNORM;
+            break;//[[fallthrough]];
           case DXGI_FORMAT_R8G8B8A8_UNORM:
-          case DXGI_FORMAT_R8G8B8A8_TYPELESS:
+          case DXGI_FORMAT_R8G8B8A8_TYPELESS: // WTF? Should be typed...
             pDesc->BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
             break;        }
 
@@ -5077,7 +5197,9 @@ SK_DXGI_CreateSwapChain_PreInit (
       if (config.render.output.force_10bpc && (! __SK_HDR_16BitSwap))
       {
         if ( DirectX::MakeTypeless (pDesc->BufferDesc.Format) ==
-             DirectX::MakeTypeless (DXGI_FORMAT_R8G8B8A8_UNORM) )
+             DirectX::MakeTypeless (DXGI_FORMAT_R8G8B8A8_UNORM) || 
+             DirectX::MakeTypeless (pDesc->BufferDesc.Format) ==
+             DirectX::MakeTypeless (DXGI_FORMAT_B8G8R8A8_UNORM) )
         {
           SK_LOGi0 ( L" >> 8-bpc format (%hs) replaced with "
                      L"DXGI_FORMAT_R10G10B10A2_UNORM for 10-bpc override",
@@ -5228,8 +5350,16 @@ SK_DXGI_CreateSwapChain_PreInit (
 
         if ( config.render.framerate.flip_discard &&
                    dxgi_caps.present.flip_discard )
-          pDesc->SwapEffect  = (DXGI_SWAP_EFFECT)DXGI_SWAP_EFFECT_FLIP_DISCARD;
-
+        {
+          if (bHasReShade)
+            pDesc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+          else
+            pDesc->SwapEffect = 
+              (original_swap_effect == DXGI_SWAP_EFFECT_DISCARD ||
+               original_swap_effect == DXGI_SWAP_EFFECT_FLIP_DISCARD) ?
+                                       DXGI_SWAP_EFFECT_FLIP_DISCARD  :
+                                       DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        }
         else // On Windows 8.1 and older, sequential must substitute for discard
           pDesc->SwapEffect  = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
       }
@@ -5250,8 +5380,16 @@ SK_DXGI_CreateSwapChain_PreInit (
     }
 
     // Option to force Flip Sequential for buggy systems
-    if (pDesc->SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD && config.render.framerate.flip_sequential)
-        pDesc->SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    if (pDesc->SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD && (config.render.framerate.flip_sequential || bHasReShade))
+        pDesc->SwapEffect  = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+
+    if ( bHasReShade &&
+            pDesc->SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL &&
+         original_swap_effect != DXGI_SWAP_EFFECT_SEQUENTIAL      &&
+         original_swap_effect != DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL )
+    {
+      SK_LOGi0 (L"  >> Using DXGI Flip Sequential for compatibility with ReShade");
+    }
 
     SK_LOGs1 ( L" DXGI 1.2 ",
                L"  >> Using %s Presentation Model  [Waitable: %s - %li ms]",
@@ -5420,13 +5558,16 @@ SK_DXGI_CreateSwapChain_PostInit (
   _In_  DXGI_SWAP_CHAIN_DESC  *pDesc,
   _In_  IDXGISwapChain       **ppSwapChain )
 {
+  SK_ReleaseAssert (pDesc != nullptr);
+
+  if (pDesc == nullptr)
+    return;
+
   SK_RenderBackend& rb =
     SK_GetCurrentRenderBackend ();
 
-  wchar_t wszClass [MAX_PATH + 2] = { };
-
-  if (pDesc != nullptr)
-    RealGetWindowClassW (pDesc->OutputWindow, wszClass, MAX_PATH);
+  wchar_t                                   wszClass [MAX_PATH + 2] = { };
+  RealGetWindowClassW (pDesc->OutputWindow, wszClass, MAX_PATH);
 
   bool dummy_window =
     SK_Win32_IsDummyWindowClass (pDesc->OutputWindow) ||
@@ -5435,13 +5576,11 @@ SK_DXGI_CreateSwapChain_PostInit (
                                ( pDesc->BufferDesc.Width  == 176 &&
                                  pDesc->BufferDesc.Height == 1 );
 
-  if ( (! dummy_window) && pDesc != nullptr &&
-       ( dwRenderThread == 0 ||
-         dwRenderThread == SK_Thread_GetCurrentId () )
-     )
+  if (! dummy_window)
   {
+    
     HWND hWndDevice = pDesc->OutputWindow;
-    HWND hWndRoot   = GetAncestor (hWndDevice, GA_ROOT);
+    HWND hWndRoot   = GetAncestor (pDesc->OutputWindow, GA_ROOTOWNER);
 
     auto& windows =
       rb.windows;
@@ -5502,28 +5641,13 @@ SK_DXGI_CreateSwapChain_PostInit (
   auto width  = client.right  - client.left;
   auto height = client.bottom - client.top;
 
-  if (pDesc != nullptr)
-  {
-    if (                   pDesc->BufferDesc.Width != 0)
-         SK_SetWindowResX (pDesc->BufferDesc.Width);
-    else SK_SetWindowResX (                  width);
+  if (                   pDesc->BufferDesc.Width != 0)
+       SK_SetWindowResX (pDesc->BufferDesc.Width);
+  else SK_SetWindowResX (                  width);
 
-    if (                   pDesc->BufferDesc.Height != 0)
-         SK_SetWindowResY (pDesc->BufferDesc.Height);
-    else SK_SetWindowResY (                  height);
-  }
-
-  else
-  {
-    if (width > 0 && height > 0)
-    {
-      SK_SetWindowResX (width);
-      SK_SetWindowResY (height);
-    }
-
-    // Should never happen under normal circumstances
-    SK_ReleaseAssert (width > 0 && height > 0);
-  }
+  if (                   pDesc->BufferDesc.Height != 0)
+       SK_SetWindowResY (pDesc->BufferDesc.Height);
+  else SK_SetWindowResY (                  height);
 
   if (  ppSwapChain != nullptr &&
        *ppSwapChain != nullptr )
@@ -5557,8 +5681,7 @@ SK_DXGI_CreateSwapChain_PostInit (
   {
     g_pD3D11Dev = pDev;
 
-    if (pDesc != nullptr)
-      rb.fullscreen_exclusive = (! pDesc->Windowed);
+    rb.fullscreen_exclusive = (! pDesc->Windowed);
   }
 
   if (rb.fullscreen_exclusive)
@@ -5745,10 +5868,13 @@ void SK_DXGI_HookDevice1     (IDXGIDevice1    *pDevice1);
 void
 SK_DXGI_LazyHookFactory (IDXGIFactory *pFactory)
 {
-  SK_RunOnce ({
-    SK_DXGI_HookFactory (pFactory);
-    SK_ApplyQueuedHooks (        );
-  });
+  if (pFactory != nullptr)
+  {
+    SK_RunOnce ({
+      SK_DXGI_HookFactory (pFactory);
+      SK_ApplyQueuedHooks (        );
+    });
+  }
 }
 
 void
@@ -5798,6 +5924,10 @@ SK_DXGI_WrapSwapChain ( IUnknown        *pDevice,
   SK_ComPtr <IDXGISwapChain1>                    pNativeSwapChain;
   SK_slGetNativeInterface (pSwapChain, (void **)&pNativeSwapChain.p);
 
+  SK_DXGI_HookSwapChain   (pNativeSwapChain != nullptr ?
+                           pNativeSwapChain.p          :
+                                 pSwapChain);
+
   SK_RenderBackend& rb =
     SK_GetCurrentRenderBackend ();
 
@@ -5822,12 +5952,25 @@ SK_DXGI_WrapSwapChain ( IUnknown        *pDevice,
     pCmdQueue->GetDevice (IID_PPV_ARGS (&pDev12.p));
 
     if (SK_slGetNativeInterface (pDev12, (void **)&pNativeDev12.p) == sl::Result::eOk)
+        _ExchangeProxyForNative (pDev12,           pNativeDev12);
+
+    UINT uiSize = sizeof (void *);
+
+    if (pNativeSwapChain != nullptr)
     {
-      pDev12 = pNativeDev12;
+      if (SK_slGetNativeInterface (pCmdQueue, (void **)&pNativeCmdQueue.p) == sl::Result::eOk)
+          _ExchangeProxyForNative (pCmdQueue,           pNativeCmdQueue);
+
+      pSwapChain->SetPrivateData       (SKID_D3D12_SwapChainCommandQueue, uiSize, pCmdQueue);
+      pNativeSwapChain->SetPrivateData (SKID_D3D12_SwapChainCommandQueue, uiSize, pCmdQueue);
+
+      pSwapChain = pNativeSwapChain;
     }
 
     ret = // TODO: Put these in a list somewhere for proper destruction
       new IWrapDXGISwapChain ((ID3D11Device *)pDev12.p, pSwapChain);
+
+    ret->SetPrivateData (SKID_D3D12_SwapChainCommandQueue, uiSize, pCmdQueue);
 
     rb.setDevice            (pDev12.p);
     rb.d3d12.command_queue = pCmdQueue.p;
@@ -5840,7 +5983,8 @@ SK_DXGI_WrapSwapChain ( IUnknown        *pDevice,
 
   else if ( pDev11 != nullptr )
   {
-    SK_slGetNativeInterface (pDev11, (void **)&pNativeDev11.p);
+    if (SK_slGetNativeInterface (pDev11, (void **)&pNativeDev11.p) == sl::Result::eOk)
+        _ExchangeProxyForNative (pDev11,           pNativeDev11);
 
     ret =
       new IWrapDXGISwapChain (pDev11.p, pSwapChain);
@@ -5886,10 +6030,12 @@ SK_DXGI_WrapSwapChain1 ( IUnknown         *pDevice,
   if (pDevice == nullptr || pSwapChain == nullptr || ppDest == nullptr)
     return nullptr;
 
-  SK_DXGI_HookSwapChain (pSwapChain);
-
   SK_ComPtr <IDXGISwapChain1>                    pNativeSwapChain;
   SK_slGetNativeInterface (pSwapChain, (void **)&pNativeSwapChain.p);
+
+  SK_DXGI_HookSwapChain   (pNativeSwapChain != nullptr ?
+                           pNativeSwapChain.p          :
+                                 pSwapChain);
 
   SK_RenderBackend& rb =
     SK_GetCurrentRenderBackend ();
@@ -5915,12 +6061,25 @@ SK_DXGI_WrapSwapChain1 ( IUnknown         *pDevice,
     pCmdQueue->GetDevice (IID_PPV_ARGS (&pDev12.p));
 
     if (SK_slGetNativeInterface (pDev12, (void **)&pNativeDev12.p) == sl::Result::eOk)
+        _ExchangeProxyForNative (pDev12,           pNativeDev12);
+
+    UINT uiSize = sizeof (void *);
+
+    if (pNativeSwapChain != nullptr)
     {
-      pDev12 = pNativeDev12;
+      if (SK_slGetNativeInterface (pCmdQueue, (void **)&pNativeCmdQueue.p) == sl::Result::eOk)
+          _ExchangeProxyForNative (pCmdQueue,           pNativeCmdQueue);
+
+      pSwapChain->SetPrivateData       (SKID_D3D12_SwapChainCommandQueue, uiSize, pCmdQueue);
+      pNativeSwapChain->SetPrivateData (SKID_D3D12_SwapChainCommandQueue, uiSize, pCmdQueue);
+
+      pSwapChain = pNativeSwapChain;
     }
 
     ret = // TODO: Put these in a list somewhere for proper destruction
       new IWrapDXGISwapChain ((ID3D11Device *)pDev12.p, pSwapChain);
+
+    ret->SetPrivateData (SKID_D3D12_SwapChainCommandQueue, uiSize, pCmdQueue);
 
     rb.setDevice            (pDev12.p);
     rb.d3d12.command_queue = pCmdQueue.p;
@@ -5934,9 +6093,7 @@ SK_DXGI_WrapSwapChain1 ( IUnknown         *pDevice,
   else if ( pDev11 != nullptr )
   {
     if (SK_slGetNativeInterface (pDev11, (void **)&pNativeDev11.p) == sl::Result::eOk)
-    {
-      pDev11 = pNativeDev11;
-    }
+        _ExchangeProxyForNative (pDev11,           pNativeDev11);
 
     ret =
       new IWrapDXGISwapChain (pDev11.p, pSwapChain);
@@ -6073,6 +6230,8 @@ DXGIFactory_CreateSwapChain_Override (
 
     return ret;
   }
+
+  WaitForInitDXGI ();
 
   auto                 orig_desc =  pDesc;
   DXGI_SWAP_CHAIN_DESC new_desc  = *pDesc;
@@ -6276,6 +6435,10 @@ DXGIFactory_CreateSwapChain_Override (
       //
       if (pCmdQueue != nullptr && pDev12 != nullptr)
       {
+        SK_ComPtr <ID3D12CommandQueue>                    pNativeCmdQueue;
+        if (SK_slGetNativeInterface (pCmdQueue, (void **)&pNativeCmdQueue.p) == sl::Result::eOk)
+            _ExchangeProxyForNative (pCmdQueue,           pNativeCmdQueue);
+
         pTemp->SetPrivateData (SKID_D3D12_SwapChainCommandQueue, sizeof (void *), pCmdQueue);
 
         SK_ComQIPtr <IDXGISwapChain3> pSwap3 (pTemp);
@@ -6585,6 +6748,51 @@ SK_D3D11_MakeCachedDeviceAndSwapChainForHwnd ( IDXGISwapChain *pSwapChain,
                                                HWND            hWnd,
                                                ID3D11Device   *pDevice );
 
+BOOL
+SK_AMD_CheckForOpenGLInterop (LPCVOID lpReturnAddr, HWND& hWnd)
+{
+  bool bAMDInteropOpenGL =
+    (StrStrIW (SK_GetCallerName (lpReturnAddr).c_str (), L"amdxc"));
+  if ( bAMDInteropOpenGL &&  config.apis.OpenGL.hook == true &&
+                    SK_IsModuleLoaded (L"OpenGL32.dll") )
+  {
+    // Search for common Vulkan layers, if they are loaded, then assume
+    //   the game is actually using Vulkan rather than OpenGL.
+    if (! (config.apis.Vulkan.hook && (SK_IsModuleLoaded (
+            SK_RunLHIfBitness (64, L"SteamOverlayVulkanLayer64.dll",
+                                   L"SteamOverlayVulkanLayer32.dll")) ||
+                                       SK_IsModuleLoaded (
+            SK_RunLHIfBitness (64, L"amdvlk64.dll",
+                                   L"amdvlk32.dll")))))
+    {
+      HWND hWndFake =
+        SK_Win32_CreateDummyWindow (0);
+
+      ShowWindow (
+             hWndFake, SW_HIDE);
+      hWnd = hWndFake;
+
+      return TRUE;
+    }
+  }
+
+  return FALSE;
+}
+
+BOOL
+SK_AMD_CheckForVkInterop (LPCVOID lpReturnAddr)
+{
+  bool bAMDInteropVk =
+    (StrStrIW (SK_GetCallerName (lpReturnAddr).c_str (), L"amdxc"));
+  if ( bAMDInteropVk && config.apis.Vulkan.hook == true &&
+                    SK_IsModuleLoaded (L"vulkan-1.dll") )
+  {
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
 HRESULT
 STDMETHODCALLTYPE
 DXGIFactory2_CreateSwapChainForHwnd_Override (
@@ -6596,10 +6804,61 @@ _In_opt_       DXGI_SWAP_CHAIN_FULLSCREEN_DESC *pFullscreenDesc,
 _In_opt_       IDXGIOutput                     *pRestrictToOutput,
    _Out_       IDXGISwapChain1                 **ppSwapChain )
 {
-  auto& rb =
-    SK_GetCurrentRenderBackend ();
+  SK_ReleaseAssert (pDesc   != nullptr);
+  SK_ReleaseAssert (pDevice != nullptr);
 
-  SK_ReleaseAssert (pDesc != nullptr);
+  if (! IsWindow (hWnd))
+  {
+    SK_LOGi0 (
+      L"IDXGIFactory2::CreateSwapChainForHwnd (pDevice=%p, {hWnd=%x}, ...)"
+      L" was passed an invalid window!",       pDevice,     hWnd);
+
+    return E_INVALIDARG;
+  }
+
+  const bool bAMDOpenGLInterop =
+    (SK_AMD_CheckForOpenGLInterop (_ReturnAddress (), hWnd));
+
+  const bool bAMDVulkanInterop =
+    (! bAMDOpenGLInterop) &&
+    (    SK_AMD_CheckForVkInterop (_ReturnAddress ()));
+
+  if (! bAMDOpenGLInterop)
+  {
+    void SK_Window_WaitForAsyncSetWindowLong (void);
+         SK_Window_WaitForAsyncSetWindowLong ();
+
+    auto ex_style =
+      SK_GetWindowLongPtrW (hWnd, GWL_EXSTYLE),
+            style =
+      SK_GetWindowLongPtrW (hWnd, GWL_STYLE);
+
+    if (ex_style & WS_EX_TOPMOST)
+    {
+      bool style_compatible = 
+        (style & (WS_POPUP   | WS_BORDER      | WS_CAPTION     |
+                  WS_SYSMENU | WS_MAXIMIZEBOX | WS_MINIMIZEBOX |
+                  WS_THICKFRAME)) != 0UL;
+
+      bool exstyle_compatible =
+        (ex_style & (WS_EX_CLIENTEDGE    | WS_EX_CONTEXTHELP |
+                     WS_EX_DLGMODALFRAME | WS_EX_TOOLWINDOW  |
+                     WS_EX_WINDOWEDGE)) != 0UL;
+
+      if (! (style_compatible && exstyle_compatible))
+      {
+        SK_LOGi0 (
+          L"IDXGIFactory2::CreateSwapChainForHwnd (...) called on a window with"
+          L" the extended WS_EX_TOPMOST style, which is invalid... removing style!"
+        );
+
+        SK_SetWindowLongPtrW (hWnd, GWL_EXSTYLE, ex_style & ~WS_EX_TOPMOST);
+
+        if (SK_GetForegroundWindow () == hWnd)
+             SK_RealizeForegroundWindow (hWnd);
+      }
+    }
+  }
 
   if (! config.render.dxgi.hooks.create_swapchain4hwnd)
   {
@@ -6609,11 +6868,10 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
                                           pRestrictToOutput, ppSwapChain );
   }
 
-  auto *pOrigDesc =
-    (DXGI_SWAP_CHAIN_DESC1 *)pDesc;
-
-  auto *pOrigFullscreenDesc =
-    (DXGI_SWAP_CHAIN_FULLSCREEN_DESC *)pFullscreenDesc;
+  IID                                                        IID_IStreamlineDXGIFactory;
+  IIDFromString (L"{ADEC44E2-61F0-45C3-AD9F-1B37379284FF}", &IID_IStreamlineDXGIFactory);
+  SK_ComPtr <IUnknown>                                           pStreamlineFactory;
+  This->QueryInterface (IID_IStreamlineDXGIFactory,    (void **)&pStreamlineFactory.p);
 
   std::wstring iname = SK_UTF8ToWideChar (
     SK_GetDXGIFactoryInterface (This)
@@ -6627,9 +6885,11 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
                          (uintptr_t)pDevice, (uintptr_t)hWnd, (uintptr_t)pDesc );
 
   // This makes no sense, so ignore it...
-  if (     pDevice == nullptr ||
-             pDesc == nullptr ||
-       ppSwapChain == nullptr || (! SK_DXGI_IsSwapChainReal1 (*pDesc, hWnd))
+  if ( pStreamlineFactory != nullptr ||
+                   bAMDOpenGLInterop ||
+                  pDevice == nullptr ||
+                    pDesc == nullptr ||
+              ppSwapChain == nullptr || ((! SK_DXGI_IsSwapChainReal1 (*pDesc, hWnd)) && (! bAMDVulkanInterop))
      )
   {
     DXGI_CALL ( ret,
@@ -6637,8 +6897,22 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
                                                       pDesc, pFullscreenDesc,
                                                         pRestrictToOutput, ppSwapChain ) );
 
+    if (pStreamlineFactory)
+      SK_LOGi0 (L"Ignoring call because it came from a Streamline proxy factory...");
+
     return ret;
   }
+
+  WaitForInitDXGI ();
+
+  auto& rb =
+    SK_GetCurrentRenderBackend ();
+
+  auto *pOrigDesc =
+    (DXGI_SWAP_CHAIN_DESC1 *)pDesc;
+
+  auto *pOrigFullscreenDesc =
+    (DXGI_SWAP_CHAIN_FULLSCREEN_DESC *)pFullscreenDesc;
 
 //  if (iname == L"{Invalid-Factory-UUID}")
 //    return CreateSwapChainForHwnd_Original (This, pDevice, hWnd, pDesc, pFullscreenDesc, pRestrictToOutput, ppSwapChain);
@@ -6651,9 +6925,6 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
                        DXGI_SWAP_CHAIN_DESC1           { };
   DXGI_SWAP_CHAIN_FULLSCREEN_DESC new_fullscreen_desc  = pFullscreenDesc ? *pFullscreenDesc :
                        DXGI_SWAP_CHAIN_FULLSCREEN_DESC { };
-
-  ///bool bFlipOriginal =
-  ///  SK_DXGI_IsFlipModelSwapEffect (pDesc->SwapEffect);
 
   pDesc           =            &new_desc1;
   pFullscreenDesc =
@@ -6744,6 +7015,8 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
 
   pDesc = &new_desc1;
 
+  _d3d12_rbk->drain_queue ();
+
   ret =
     CreateSwapChainForHwnd_Original ( This, pDevice, hWnd, pDesc, pFullscreenDesc,
                                         pRestrictToOutput, &pTemp );
@@ -6791,8 +7064,18 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
       //
       if (pCmdQueue != nullptr && pDev12 != nullptr)
       {
-        SK_ComQIPtr <IDXGISwapChain3> pSwap3 (pTemp);
-        SK_D3D12_HotSwapChainHook (   pSwap3, pDev12.p);
+        SK_ComPtr <IDXGISwapChain3> pNativeSwap3;
+        SK_ComPtr <ID3D12Device>    pNativeDev12;
+
+        if (                         pDev12.p                            != nullptr &&
+            SK_slGetNativeInterface (pDev12.p, (void **)&pNativeDev12.p) == sl::Result::eOk)
+            _ExchangeProxyForNative (pDev12,             pNativeDev12);
+        SK_ComQIPtr<IDXGISwapChain3> pSwap3 (pTemp);
+        if (                         pSwap3.p                            != nullptr &&
+            SK_slGetNativeInterface (pSwap3.p, (void **)&pNativeSwap3.p) == sl::Result::eOk)
+            _ExchangeProxyForNative (pSwap3,             pNativeSwap3);
+
+        SK_D3D12_HotSwapChainHook   (pSwap3, pDev12);
 
         if (rb.active_traits.bImplicitlyWaitable)
           pSwap3->SetMaximumFrameLatency (config.render.framerate.pre_render_limit > 0 ?
@@ -6800,7 +7083,6 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
       }
 
       SK_DXGI_CreateSwapChain1_PostInit (pDevice, hWnd, pOrigDesc, pOrigFullscreenDesc, &pTemp);
-      //*ppSwapChain = pTemp;
         SK_DXGI_WrapSwapChain1          (pDevice,                                        pTemp,
                                         ppSwapChain,    orig_desc1.Format);
 
@@ -6815,13 +7097,15 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
     {
       if (pDev11.p != nullptr)
       {
+        extern bool SK_NV_D3D11_HasInteropDevice;
+
         bool bNvInterop = false;
 
         //
         // Detect NVIDIA's Interop SwapChain
         //
         if ( SK_GetModuleHandle (L"vulkan-1.dll") &&
-             SK_GetCallerName ().find (L"nvoglv") != std::wstring::npos )
+             (SK_GetCallerName ().find (L"nvoglv") != std::wstring::npos || SK_NV_D3D11_HasInteropDevice) )
         {
           UINT                                 uiFlagAsInterop = SK_DXGI_VK_INTEROP_TYPE_NV;
           (*ppSwapChain)->SetPrivateData (
@@ -6844,6 +7128,10 @@ _In_opt_       IDXGIOutput                     *pRestrictToOutput,
       // D3D12
       else if (pCmdQueue.p != nullptr)
       {
+        SK_ComPtr <ID3D12CommandQueue>                    pNativeCmdQueue;
+        if (SK_slGetNativeInterface (pCmdQueue, (void **)&pNativeCmdQueue.p) == sl::Result::eOk)
+            _ExchangeProxyForNative (pCmdQueue,           pNativeCmdQueue);
+
         (*ppSwapChain)->SetPrivateData (SKID_D3D12_SwapChainCommandQueue, sizeof (void *), pCmdQueue);
 
         //
@@ -7104,6 +7392,18 @@ STDMETHODCALLTYPE GetDesc2_Override (IDXGIAdapter2      *This,
       dll_log->LogEx (false, L"Failure! (No Match Found)\n");
   }
 
+  pDesc->DedicatedSystemMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->DedicatedSystemMemory));
+
+  pDesc->DedicatedVideoMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->DedicatedVideoMemory));
+
+  pDesc->SharedSystemMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->SharedSystemMemory));
+
   return ret;
 }
 
@@ -7141,6 +7441,18 @@ STDMETHODCALLTYPE GetDesc1_Override (IDXGIAdapter1      *This,
     else
       dll_log->LogEx (false, L"Failure! (No Match Found)\n");
   }
+
+  pDesc->DedicatedSystemMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->DedicatedSystemMemory));
+
+  pDesc->DedicatedVideoMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->DedicatedVideoMemory));
+
+  pDesc->SharedSystemMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->SharedSystemMemory));
 
   return ret;
 }
@@ -7190,6 +7502,18 @@ STDMETHODCALLTYPE GetDesc_Override (IDXGIAdapter      *This,
                        pDesc->DedicatedSystemMemory >> 20UL,
                          pDesc->SharedSystemMemory  >> 20UL );
   }
+
+  pDesc->DedicatedSystemMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->DedicatedSystemMemory));
+
+  pDesc->DedicatedVideoMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->DedicatedVideoMemory));
+
+  pDesc->SharedSystemMemory =
+    static_cast <SIZE_T> (config.render.dxgi.vram_budget_scale *
+                          static_cast <double> (pDesc->SharedSystemMemory));
 
   if ( SK_GetCurrentGameID () == SK_GAME_ID::Fallout4 &&
           SK_GetCallerName () == L"Fallout4.exe"  )
@@ -7315,6 +7639,13 @@ STDMETHODCALLTYPE EnumAdapters_Common (IDXGIFactory       *This,
     }
 
     dll_log->LogEx (false, L"\n");
+  }
+
+  if (ppAdapter != nullptr && *ppAdapter != nullptr)
+  {
+    void
+    SK_DXGI_HookAdapter (IDXGIAdapter* pAdapter);
+    SK_DXGI_HookAdapter (*ppAdapter);
   }
 
   return S_OK;
@@ -7565,13 +7896,13 @@ DXGIGetDebugInterface1 ( UINT     Flags,
   if (pDebug == nullptr)
     return DXGI_ERROR_INVALID_CALL;
 
-  *pDebug = nullptr;
-
   if (DXGIGetDebugInterface1_Import == nullptr)
   {
     SK_RunOnce (SK_BootDXGI ());
             WaitForInitDXGI ();
   }
+
+  *pDebug = nullptr;
 
   return DXGIGetDebugInterface1_Import != nullptr            ?
          DXGIGetDebugInterface1_Import (Flags, riid, pDebug) :
@@ -7582,6 +7913,11 @@ HRESULT
 WINAPI CreateDXGIFactory (REFIID   riid,
                     _Out_ void   **ppFactory)
 {
+  if (ppFactory == nullptr)
+    return E_INVALIDARG;
+
+  *ppFactory = nullptr;
+
   if (SK_COMPAT_IgnoreDxDiagnCall ())
     return E_NOTIMPL;
 
@@ -7639,14 +7975,27 @@ WINAPI CreateDXGIFactory (REFIID   riid,
     DXGI_CALL (ret, CreateDXGIFactory_Import (riid, ppFactory));
   }
 
+  if ( ppFactory == nullptr ||
+      *ppFactory == nullptr)
+  {
+    ret = E_INVALIDARG;
+  }
+
   if (SUCCEEDED (ret) && *ppFactory != nullptr)
   {
-    SK_DXGI_LazyHookFactory ((IDXGIFactory *)*ppFactory);
+    SK_GetDXGIFactoryInterfaceVer ((IUnknown *)*ppFactory);
+    SK_DXGI_LazyHookFactory   ((IDXGIFactory *)*ppFactory);
 
     if (config.render.dxgi.use_factory_cache)
     {
       __SK_DXGI_FactoryCache.addFactory (ppFactory, riid);
     }
+  }
+
+  if ( ppFactory == nullptr ||
+      *ppFactory == nullptr)
+  {
+    ret = E_INVALIDARG;
   }
 
   return ret;
@@ -7661,6 +8010,11 @@ WINAPI CreateDXGIFactory1 (REFIID   riid,
                      _Out_ void   **ppFactory)
 
 {
+  if (ppFactory == nullptr)
+    return E_INVALIDARG;
+
+  *ppFactory = nullptr;
+
   if (SK_COMPAT_IgnoreDxDiagnCall ())
     return E_NOTIMPL;
 
@@ -7734,8 +8088,16 @@ WINAPI CreateDXGIFactory1 (REFIID   riid,
   HRESULT    ret;
   DXGI_CALL (ret, CreateDXGIFactory1_Import (riid, &pFactory_));
 
+  if (ppFactory  == nullptr ||
+       pFactory_ == nullptr)
+  {
+    ret = E_INVALIDARG;
+  }
+
   if (SUCCEEDED (ret) && pFactory_ != nullptr)
   {
+    SK_GetDXGIFactoryInterfaceVer ((IUnknown *)pFactory_);
+
 #if 0
     auto newFactory =
       new SK_IWrapDXGIFactory ();
@@ -7754,7 +8116,13 @@ WINAPI CreateDXGIFactory1 (REFIID   riid,
     }
   }
 
-  return     ret;
+  if ( ppFactory == nullptr ||
+      *ppFactory == nullptr)
+  {
+    ret = E_INVALIDARG;
+  }
+
+  return ret;
 }
 
 HRESULT
@@ -7762,6 +8130,9 @@ WINAPI CreateDXGIFactory2 (UINT     Flags,
                            REFIID   riid_,
                      _Out_ void   **ppFactory)
 {
+  if (ppFactory == nullptr)
+    return E_INVALIDARG;
+
   IID riid = riid_;
 
   // Upgrade everything to at least IDXGIFactory5 implicitly
@@ -7857,8 +8228,16 @@ WINAPI CreateDXGIFactory2 (UINT     Flags,
   HRESULT    ret;
   DXGI_CALL (ret, CreateDXGIFactory2_Import (Flags, riid, &pFactory_));
 
+  if ( ppFactory == nullptr ||
+       pFactory_ == nullptr)
+  {
+    ret = E_INVALIDARG;
+  }
+
   if (SUCCEEDED (ret) && pFactory_ != nullptr)
   {
+    SK_GetDXGIFactoryInterfaceVer ((IUnknown *)pFactory_);
+
 #if 0
     auto newFactory =
       new SK_IWrapDXGIFactory ();
@@ -8082,6 +8461,41 @@ SK_HookDXGI (void)
 
     SK_ApplyQueuedHooks ();
 
+
+    static auto _InitDXGIFactoryInterfaces = [&](void)
+    {
+      SK_AutoCOMInit _autocom;
+      SK_ComPtr <IDXGIFactory>                       pFactory;
+      CreateDXGIFactory (IID_IDXGIFactory, (void **)&pFactory.p);
+    };
+
+    // This is going to fail if performed from DllMain
+    if (! SK_TLS_Bottom ()->debug.in_DllMain)
+    {
+      _InitDXGIFactoryInterfaces ();
+    }
+
+    else
+    {
+      // Thus we need to use a secondary thread
+      HANDLE hSecondaryThread =
+        SK_Thread_CreateEx ([](LPVOID)->DWORD
+        {
+          _InitDXGIFactoryInterfaces ();
+
+          return 0;
+        });
+
+      // And ... wait briefly on that thread, the timeout is critical
+      //   because this could deadlock otherwise.
+      if (hSecondaryThread != 0)
+      {
+        WaitForSingleObject (hSecondaryThread, 250UL);
+        SK_CloseHandle      (hSecondaryThread);
+      }
+    }
+    
+
     if (config.apis.dxgi.d3d11.hook)
     {
       SK_D3D11_InitTextures ();
@@ -8177,8 +8591,8 @@ IDXGISwapChain4_SetHDRMetaData ( IDXGISwapChain4*        This,
 {
   SK_LOG_FIRST_CALL
 
-  if (__SK_HDR_10BitSwap || __SK_HDR_16BitSwap)
-    return S_OK;
+  auto                    orig_type = Type;
+  DXGI_HDR_METADATA_HDR10 metadata  = {};
 
   if (config.render.dxgi.hdr_metadata_override >= 0)
   {
@@ -8191,10 +8605,96 @@ IDXGISwapChain4_SetHDRMetaData ( IDXGISwapChain4*        This,
       return S_OK;
   }
 
-  SK_RenderBackend& rb =
-    SK_GetCurrentRenderBackend ();
+  if (Type == DXGI_HDR_METADATA_TYPE_NONE || (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10))
+  {
+    if (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10)
+    {
+      metadata =
+        *(DXGI_HDR_METADATA_HDR10 *)pMetaData;
 
-  rb.framebuffer_flags &= ~SK_FRAMEBUFFER_FLAG_HDR;
+      SK_LOGi0 (
+        L"HDR Metadata: Max Mastering=%d nits, Min Mastering=%f nits, MaxCLL=%d nits, MaxFALL=%d nits",
+        metadata.MaxMasteringLuminance, (double)metadata.MinMasteringLuminance * 0.0001,
+        metadata.MaxContentLightLevel,          metadata.MaxFrameAverageLightLevel
+      );
+    }
+
+    if (config.render.dxgi.hdr_metadata_override == -1)
+    {
+      auto& rb =
+        SK_GetCurrentRenderBackend ();
+
+      auto& display =
+        rb.displays [rb.active_display];
+
+      if (display.gamut.maxLocalY == 0.0f)
+      {
+        This->SetFullscreenState (FALSE, nullptr);
+
+        // Make sure we're not screwed over by NVIDIA Streamline
+        SK_ComPtr <IDXGIOutput>                      pOutput;
+        SK_ComPtr <IDXGISwapChain4>                  pNativeSwap4;
+        if (SK_slGetNativeInterface (This, (void **)&pNativeSwap4.p) == sl::Result::eOk)
+                                                     pNativeSwap4->GetContainingOutput (&pOutput.p);
+        else                                                 This->GetContainingOutput (&pOutput.p);
+
+        SK_ComQIPtr <IDXGIOutput6>
+            pOutput6 (   pOutput);
+        if (pOutput6.p != nullptr)
+        {
+          DXGI_OUTPUT_DESC1    outDesc1 = { };
+          pOutput6->GetDesc1 (&outDesc1);
+
+          display.gamut.maxLocalY   = outDesc1.MaxLuminance;
+          display.gamut.maxAverageY = outDesc1.MaxFullFrameLuminance;
+          display.gamut.maxY        = outDesc1.MaxLuminance;
+          display.gamut.minY        = outDesc1.MinLuminance;
+          display.gamut.xb          = outDesc1.BluePrimary  [0];
+          display.gamut.yb          = outDesc1.BluePrimary  [1];
+          display.gamut.xg          = outDesc1.GreenPrimary [0];
+          display.gamut.yg          = outDesc1.GreenPrimary [1];
+          display.gamut.xr          = outDesc1.RedPrimary   [0];
+          display.gamut.yr          = outDesc1.RedPrimary   [1];
+          display.gamut.Xw          = outDesc1.WhitePoint   [0];
+          display.gamut.Yw          = outDesc1.WhitePoint   [1];
+          display.gamut.Zw          = 1.0f - display.gamut.Xw - display.gamut.Yw;
+
+          SK_ReleaseAssert (outDesc1.Monitor == display.monitor || display.monitor == 0);
+        }
+      }
+
+      metadata.MinMasteringLuminance     = sk::narrow_cast <UINT>   (display.gamut.minY / 0.0001);
+      metadata.MaxMasteringLuminance     = sk::narrow_cast <UINT>   (display.gamut.maxY);
+      metadata.MaxContentLightLevel      = sk::narrow_cast <UINT16> (display.gamut.maxLocalY);
+      metadata.MaxFrameAverageLightLevel = sk::narrow_cast <UINT16> (display.gamut.maxAverageY);
+
+      metadata.BluePrimary  [0]          = sk::narrow_cast <UINT16> (display.gamut.xb * 50000.0F);
+      metadata.BluePrimary  [1]          = sk::narrow_cast <UINT16> (display.gamut.yb * 50000.0F);
+      metadata.RedPrimary   [0]          = sk::narrow_cast <UINT16> (display.gamut.xr * 50000.0F);
+      metadata.RedPrimary   [1]          = sk::narrow_cast <UINT16> (display.gamut.yr * 50000.0F);
+      metadata.GreenPrimary [0]          = sk::narrow_cast <UINT16> (display.gamut.xg * 50000.0F);
+      metadata.GreenPrimary [1]          = sk::narrow_cast <UINT16> (display.gamut.yg * 50000.0F);
+      metadata.WhitePoint   [0]          = sk::narrow_cast <UINT16> (display.gamut.Xw * 50000.0F);
+      metadata.WhitePoint   [1]          = sk::narrow_cast <UINT16> (display.gamut.Yw * 50000.0F);
+
+      SK_RunOnce (
+        SK_LOGi0 (
+          L"Metadata Override: Max Mastering=%d nits, Min Mastering=%f nits, MaxCLL=%d nits, MaxFALL=%d nits",
+          metadata.MaxMasteringLuminance, (double)metadata.MinMasteringLuminance * 0.0001,
+          metadata.MaxContentLightLevel,          metadata.MaxFrameAverageLightLevel
+        )
+      );
+
+      if (Size == sizeof (DXGI_HDR_METADATA_HDR10) && Type == DXGI_HDR_METADATA_TYPE_HDR10)
+        *(DXGI_HDR_METADATA_HDR10 *)pMetaData = metadata;
+      else
+      {
+        pMetaData = &metadata;
+        Size      = sizeof (DXGI_HDR_METADATA_HDR10);
+        Type      = DXGI_HDR_METADATA_TYPE_HDR10;
+      }
+    }
+  }
 
   DXGI_SWAP_CHAIN_DESC swapDesc = { };
   This->GetDesc      (&swapDesc);
@@ -8204,7 +8704,7 @@ IDXGISwapChain4_SetHDRMetaData ( IDXGISwapChain4*        This,
 
   //SK_HDR_GetControl ()->meta._AdjustmentCount++;
 
-  if (SUCCEEDED (hr) && Type == DXGI_HDR_METADATA_TYPE_HDR10)
+  if (SUCCEEDED (hr) && orig_type == DXGI_HDR_METADATA_TYPE_HDR10)
   {
     // HDR requires Fullscreen Exclusive or DXGI Flip Model, this should never succeed
     if (config.system.log_level > 0)
@@ -8219,7 +8719,8 @@ IDXGISwapChain4_SetHDRMetaData ( IDXGISwapChain4*        This,
       if ( SK_DXGI_IsFlipModelSwapChain (swapDesc) ||
                                          swapDesc.Windowed == FALSE )
       {
-        rb.framebuffer_flags |= SK_FRAMEBUFFER_FLAG_HDR;
+        // Obsolete, go by calls to SetColorSpace1 instead...
+        ////rb.framebuffer_flags |= SK_FRAMEBUFFER_FLAG_HDR;
       }
     }
   }
@@ -8316,6 +8817,20 @@ IDXGISwapChain3_CheckColorSpaceSupport_Override (
 
   if (pColorSpaceSupported == nullptr)
     return DXGI_ERROR_INVALID_CALL;
+
+  // NVIDIA will fallback to a D3D11 SwapChain for interop if we tell it that
+  //   G22_NONE_P709 is unsupported.
+  if (config.compatibility.disable_dx12_vk_interop)
+  {
+    if (ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709)
+    {
+      if (SK_GetCallingDLL () != SK_GetDLL ())
+      {
+        *pColorSpaceSupported = 0x0;
+        return S_OK;
+      }
+    }
+  }
 
   // SK has a trick where it can override PQ to scRGB, but often when that
   //   mode is active, the game's going to fail this call. We need to lie (!)
@@ -8524,6 +9039,9 @@ SK_DXGISwap3_SetColorSpace1_Impl (
 
   if (SUCCEEDED (hr))
   {
+    config.render.hdr.last_used_colorspace = ColorSpace;
+    config.utility.save_async ();
+
     // {018B57E4-1493-4953-ADF2-DE6D99CC05E5}
     static constexpr GUID SKID_SwapChainColorSpace =
     { 0x18b57e4, 0x1493, 0x4953, { 0xad, 0xf2, 0xde, 0x6d, 0x99, 0xcc, 0x5, 0xe5 } };
@@ -8661,7 +9179,7 @@ SK_DXGI_HookSwapChain (IDXGISwapChain* pProxySwapChain)
     return;
 
   const bool bHasStreamline =
-    SK_IsModuleLoaded (L"sl.dlss_g.dll");
+    SK_IsModuleLoaded (L"sl.interposer.dll");
 
   SK_ComPtr <IDXGISwapChain> pSwapChain;
 
@@ -8873,7 +9391,7 @@ SK_DXGI_HookDevice1 (IDXGIDevice1* pProxyDevice)
     return;
 
   const bool bHasStreamline =
-    SK_IsModuleLoaded (L"sl.dlss_g.dll");
+    SK_IsModuleLoaded (L"sl.interposer.dll");
 
   SK_ComPtr <IDXGIDevice1> pDevice;
 
@@ -8931,6 +9449,88 @@ SK_DXGI_HookDevice1 (IDXGIDevice1* pProxyDevice)
   SK_Thread_SpinUntilAtomicMin (&hooked, 2);
 }
 
+using IDXGIAdapter3_QueryVideoMemoryInfo_pnf = HRESULT (STDMETHODCALLTYPE *)(IDXGIAdapter3*,
+                                                                             UINT,DXGI_MEMORY_SEGMENT_GROUP,
+                                                                             DXGI_QUERY_VIDEO_MEMORY_INFO*);
+
+IDXGIAdapter3_QueryVideoMemoryInfo_pnf
+IDXGIAdapter3_QueryVideoMemoryInfo_Original = nullptr;
+
+HRESULT
+STDMETHODCALLTYPE
+IDXGIAdapter3_QueryVideoMemoryInfo_Detour ( IDXGIAdapter3                *This,
+                                      _In_  UINT                          NodeIndex,
+                                      _In_  DXGI_MEMORY_SEGMENT_GROUP     MemorySegmentGroup,
+                                      _Out_ DXGI_QUERY_VIDEO_MEMORY_INFO *pVideoMemoryInfo )
+{
+  SK_LOG_FIRST_CALL;
+
+  HRESULT hr =
+    IDXGIAdapter3_QueryVideoMemoryInfo_Original (This, NodeIndex, MemorySegmentGroup, pVideoMemoryInfo);
+
+  if (SUCCEEDED (hr))
+  {
+    pVideoMemoryInfo->Budget =
+      static_cast <UINT64> (
+      static_cast <double> (pVideoMemoryInfo->Budget) * config.render.dxgi.vram_budget_scale);
+  }
+
+  return hr;
+}
+
+void
+SK_DXGI_HookAdapter (IDXGIAdapter* pAdapter)
+{
+  static volatile
+               LONG hooked   = FALSE;
+  if (ReadAcquire (&hooked) != FALSE)
+    return;
+
+  //  0 QueryInterface
+  //  1 AddRef
+  //  2 Release
+
+  //  3 SetPrivateData
+  //  4 SetPrivateDataInterface
+  //  5 GetPrivateData
+  //  6 GetParent
+
+  // IDXGIAdapter
+  // 
+  //  7 EnumOutputs
+  //  8 GetDesc
+  //  9 CheckInterfaceSupport
+
+  // IDXGIAdapter1
+  // 
+  // 10 GetDesc1
+
+  // IDXGIAdapter2
+  // 
+  // 11 GetDesc2
+
+  // IDXGIAdapter3
+  // 
+  // 12 RegisterHardwareContentProtectionTeardownStatusEvent
+  // 13 UnregisterHardwareContentProtectionTeardownStatus
+  // 14 QueryVideoMemoryInfo        
+  // 15 SetVideoMemoryReservation
+  // 16 RegisterVideoMemoryBudgetChangeNotificationEvent
+  // 17 UnregisterVideoMemoryBudgetChangeNotification
+
+  SK_ComQIPtr <IDXGIAdapter3>
+                   pAdapter3 (pAdapter);
+  if (nullptr  !=  pAdapter3)
+  {
+    DXGI_VIRTUAL_HOOK ( &pAdapter3.p, 14,
+                        "IDXGIAdapter3::QueryVideoMemoryInfo",
+                         IDXGIAdapter3_QueryVideoMemoryInfo_Detour,
+                         IDXGIAdapter3_QueryVideoMemoryInfo_Original,
+                         IDXGIAdapter3_QueryVideoMemoryInfo_pfn );
+    SK_ApplyQueuedHooks ();
+  }
+}
+
 void
 SK_DXGI_HookFactory (IDXGIFactory* pProxyFactory)
 {
@@ -8943,8 +9543,10 @@ SK_DXGI_HookFactory (IDXGIFactory* pProxyFactory)
   if (ReadAcquire (&hooked) != FALSE)
     return;
 
+  SK_GetDXGIFactoryInterfaceVer (pProxyFactory);
+
   const bool bHasStreamline =
-    SK_IsModuleLoaded (L"sl.dlss_g.dll");
+    SK_IsModuleLoaded (L"sl.interposer.dll");
 
   SK_ComPtr <IDXGIFactory> pFactory;
 
@@ -9139,16 +9741,22 @@ SK_DXGI_SafeCreateSwapChain ( IDXGIFactory          *pFactory,
 
   __except (EXCEPTION_EXECUTE_HANDLER)
   {
-    *ppSwapChain = nullptr;
+    if (ppSwapChain != nullptr)
+       *ppSwapChain  = nullptr;
   }
 
   return E_NOTIMPL;
 }
 
+#include <render/d3d12/d3d12_device.h>
+#include <render/d3d12/d3d12_command_queue.h>
+
 DWORD
 __stdcall
 HookDXGI (LPVOID user)
 {
+  static SK_AutoCOMInit _autocom;
+
   SetCurrentThreadDescription (L"[SK] DXGI Hook Crawler");
 
   // "Normal" games don't change render APIs mid-game; Talos does, but it's
@@ -9275,7 +9883,7 @@ HookDXGI (LPVOID user)
 
 
     bool    bHookSuccess   = false;
-    bool    bHasStreamline = SK_IsModuleLoaded (L"sl.dlss_g.dll");
+    bool    bHasStreamline = SK_IsModuleLoaded (L"sl.interposer.dll");
     HRESULT hr             = E_NOTIMPL;
 
     SK_ComPtr <IDXGIAdapter>
@@ -9285,9 +9893,58 @@ HookDXGI (LPVOID user)
       config.render.dxgi.debug_layer ?
            DXGI_CREATE_FACTORY_DEBUG : 0x0;
 
+    if (config.render.dxgi.debug_layer)
+    {
+      static const char* D3D12SDKPath =
+        (const char *)GetProcAddress (nullptr, "D3D12SDKPath");
+
+      wchar_t    wszD3D12CorePath [MAX_PATH] = {};
+      wcsncpy_s (wszD3D12CorePath, MAX_PATH, SK_GetHostPath (), _TRUNCATE);
+
+      if (D3D12SDKPath != nullptr)
+      { PathAppendW (wszD3D12CorePath, SK_UTF8ToWideChar (D3D12SDKPath).c_str ());
+        PathAppendW (wszD3D12CorePath, L"D3D12Core.dll");
+      } else {
+        PathAppendW (wszD3D12CorePath, LR"(\D3D12\D3D12Core.dll)");
+      }
+
+      if (PathFileExistsW (wszD3D12CorePath) && SK_LoadLibraryW (wszD3D12CorePath))
+      {
+        using D3D12GetInterface_pfn = HRESULT (WINAPI *)(REFCLSID rclsid, REFIID riid, void **ppvDebug);
+
+        D3D12GetInterface_pfn
+       _D3D12GetInterface =
+       (D3D12GetInterface_pfn)SK_GetProcAddress (wszD3D12CorePath,
+       "D3D12GetInterface");
+
+        if (_D3D12GetInterface != nullptr)
+        {
+          SK_ComPtr <ID3D12Debug>                                             pDebugD3D12;
+          if (SUCCEEDED (_D3D12GetInterface (CLSID_D3D12Debug, IID_PPV_ARGS (&pDebugD3D12.p))))
+                                                                              pDebugD3D12->EnableDebugLayer ();
+        }
+      }
+
+      else if (SK_IsModuleLoaded (L"d3d12.dll"))
+      {
+        D3D12GetDebugInterface_pfn
+       _D3D12GetDebugInterface =
+       (D3D12GetDebugInterface_pfn)SK_GetProcAddress (L"d3d12.dll",
+       "D3D12GetDebugInterface");
+
+        if (_D3D12GetDebugInterface != nullptr)
+        {
+          SK_ComPtr <ID3D12Debug>                                pDebugD3D12;
+          if (SUCCEEDED (_D3D12GetDebugInterface (IID_PPV_ARGS (&pDebugD3D12.p))))
+                                                                 pDebugD3D12->EnableDebugLayer ();
+        }
+      }
+    }
+
     SK_ComPtr <IDXGIFactory>                 pFactory;
     CreateDXGIFactory2_Import ( factory_flags,
           __uuidof (IDXGIFactory), (void **)&pFactory.p);
+
     SK_ComQIPtr    <IDXGIFactory7>           pFactory7
                                             (pFactory);
     if (pFactory7 != nullptr)
@@ -9301,7 +9958,7 @@ HookDXGI (LPVOID user)
 
     // Probably better named Nixxes mode, what a pain :(
     const bool bStreamlineMode =
-      false;
+      config.compatibility.init_sync_for_streamline;
       //SK_GetCurrentGameID () == SK_GAME_ID::HorizonForbiddenWest ||
       //(SK_GetModuleHandleW (L"sl.dlss_g.dll") && config.system.global_inject_delay == 0.0f);
 
@@ -9312,87 +9969,99 @@ HookDXGI (LPVOID user)
     //   that requires NVIDIA's DXGI/Vulkan interop layer
     if (bStreamlineMode || bReShadeMode)
     {
-      SK_slUpgradeInterface ((void **)&pFactory.p);
-
       using D3D12CreateDevice_pfn =
         HRESULT (WINAPI *)( IUnknown         *pAdapter,
                             D3D_FEATURE_LEVEL MinimumFeatureLevel,
                             REFIID            riid,
                             void            **ppDevice );
 
-      SK_ComPtr <ID3D12Device>       pDevice12;
-      SK_ComPtr <ID3D12CommandQueue> pCmdQueue;
+      SK_ComPtr <ID3D12Device>       pDevice12, pNativeDevice12;
+      SK_ComPtr <ID3D12CommandQueue> pCmdQueue, pNativeCmdQueue;
 
-      D3D11CoreCreateDevice_pfn
-      D3D11CoreCreateDevice = (D3D11CoreCreateDevice_pfn)SK_GetProcAddress (
-             LoadLibraryExW (L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32),
-                              "D3D11CoreCreateDevice" );
+      if (config.compatibility.allow_fake_streamline)
+      {
+        D3D11CoreCreateDevice_pfn
+        D3D11CoreCreateDevice = (D3D11CoreCreateDevice_pfn)SK_GetProcAddress (
+               LoadLibraryExW (L"d3d11.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32),
+                                "D3D11CoreCreateDevice" );
 
-      //// Favor this codepath because it bypasses many things like ReShade, but
-      ////   it's necessary to skip this path if NVIDIA's Vk/DXGI interop layer is active
-      if (D3D11CoreCreateDevice != nullptr && (! ( SK_GetModuleHandle (L"vulkan-1.dll") ||
-                                                   SK_GetModuleHandle (L"OpenGL32.dll") ) )) 
-      {
-        hr =
-          D3D11CoreCreateDevice (
-            nullptr, pAdapter0,
-              D3D_DRIVER_TYPE_UNKNOWN, nullptr,
-                config.render.dxgi.debug_layer ?
-                     D3D11_CREATE_DEVICE_DEBUG : 0x0,
-                                levels,
-                    _ARRAYSIZE (levels),
-                      D3D11_SDK_VERSION,
-                        &pDevice.p,
-                          &featureLevel );
-      }
-      
-      else
-      {
-        hr =
-          D3D11CreateDevice_Import (
-            pAdapter0, D3D_DRIVER_TYPE_UNKNOWN,
-              nullptr,
+        //// Favor this codepath because it bypasses many things like ReShade, but
+        ////   it's necessary to skip this path if NVIDIA's Vk/DXGI interop layer is active
+        if (D3D11CoreCreateDevice != nullptr && (! ( SK_GetModuleHandle (L"vulkan-1.dll") ||
+                                                     SK_GetModuleHandle (L"OpenGL32.dll") ) )) 
+        {
+          hr =
+            D3D11CoreCreateDevice (
+              nullptr, pAdapter0,
+                D3D_DRIVER_TYPE_UNKNOWN, nullptr,
                   config.render.dxgi.debug_layer ?
                        D3D11_CREATE_DEVICE_DEBUG : 0x0,
                                   levels,
                       _ARRAYSIZE (levels),
                         D3D11_SDK_VERSION,
                           &pDevice.p,
-                            &featureLevel,
-                              nullptr );
+                            &featureLevel );
+        }
+        
+        else
+        {
+          hr =
+            D3D11CreateDevice_Import (
+              pAdapter0, D3D_DRIVER_TYPE_UNKNOWN,
+                nullptr,
+                    config.render.dxgi.debug_layer ?
+                         D3D11_CREATE_DEVICE_DEBUG : 0x0,
+                                    levels,
+                        _ARRAYSIZE (levels),
+                          D3D11_SDK_VERSION,
+                            &pDevice.p,
+                              &featureLevel,
+                                nullptr );
+        }
       }
       
-      // Stupid NVIDIA Streamline hack; lowers software compatibility with everything else.
-      //   Therfore, just it may be better to leave Streamline unsupported.
-      if (SK_IsModuleLoaded (L"d3d12.dll"))
+      if (! config.compatibility.allow_fake_streamline)
       {
-        static D3D12CreateDevice_pfn
-          D3D12CreateDevice = (D3D12CreateDevice_pfn)
-            SK_GetProcAddress (L"d3d12.dll",
-                              "D3D12CreateDevice");
+        SK_slUpgradeInterface ((void **)&pFactory.p);
 
-        if (SUCCEEDED (D3D12CreateDevice (pAdapter0, D3D_FEATURE_LEVEL_11_1, IID_PPV_ARGS (&pDevice12.p))))
+        SK_LoadLibraryW (L"d3d12.dll");
+
+        // Stupid NVIDIA Streamline hack; lowers software compatibility with everything else.
+        //   Therefore, just it may be better to leave Streamline unsupported.
+        if (SK_IsModuleLoaded (L"d3d12.dll"))
         {
-          if (sl::Result::eOk == SK_slUpgradeInterface ((void **)&pDevice12.p))
-            SK_LOGi0 (L"Upgraded D3D12 Device to Streamline Proxy...");
+          static D3D12CreateDevice_pfn
+            D3D12CreateDevice = (D3D12CreateDevice_pfn)
+              SK_GetProcAddress (L"d3d12.dll",
+                                "D3D12CreateDevice");
 
-          D3D12_COMMAND_QUEUE_DESC
-            queue_desc       = { };
-            queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-            queue_desc.Type  = D3D12_COMMAND_LIST_TYPE_DIRECT;
+          if (SUCCEEDED (D3D12CreateDevice (pAdapter0, D3D_FEATURE_LEVEL_11_1, IID_PPV_ARGS (&pDevice12.p))))
+          {
+            if (SK_slGetNativeInterface (pDevice12.p, (void **)&pNativeDevice12.p) == sl::Result::eOk)
+            {   _ExchangeProxyForNative (pDevice12,             pNativeDevice12);
+              SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd D3D12 Device...");
+            }
 
-          pDevice12->CreateCommandQueue (&queue_desc, IID_PPV_ARGS (&pCmdQueue.p));
+            SK_D3D12_InstallDeviceHooks       (pDevice12.p);
+            SK_D3D12_InstallCommandQueueHooks (pDevice12.p);
 
-          if (sl::Result::eOk == SK_slUpgradeInterface ((void **)&pCmdQueue.p))
-            SK_LOGi0 (L"Upgraded D3D12 Command Queue to Streamline Proxy...");
+            if (sl::Result::eOk == SK_slUpgradeInterface ((void **)&pDevice12.p))
+              SK_LOGi0 (L"Upgraded D3D12 Device to Streamline Proxy...");
 
-          pDevice12.p->AddRef ();
+            D3D12_COMMAND_QUEUE_DESC
+              queue_desc       = { };
+              queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
+              queue_desc.Type  = D3D12_COMMAND_LIST_TYPE_DIRECT;
+
+            pDevice12->CreateCommandQueue (&queue_desc, IID_PPV_ARGS (&pCmdQueue.p));
+          }
         }
       }
 
       if (SUCCEEDED (hr))
       {
-        pDevice->GetImmediateContext (&pImmediateContext.p);
+        if (pDevice != nullptr)
+            pDevice->GetImmediateContext (&pImmediateContext.p);
 
         if (! pDevice12)
           SK_DXGI_SafeCreateSwapChain (pFactory, pDevice.p, &desc, &pSwapChain.p);
@@ -9406,36 +10075,19 @@ HookDXGI (LPVOID user)
 
       if (bHasStreamline)
       {
-        if (SK_slGetNativeInterface (pSwapChain.p, (void **)&pNativeSwapChain.p) == sl::Result::eOk)
-        {
-          SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd DXGI SwapChain...");
+        if (SK_slGetNativeInterface (pFactory.p, (void **)&pNativeFactory.p) == sl::Result::eOk)
+        {   _ExchangeProxyForNative (pFactory,             pNativeFactory);
+          SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd DXGI Factory...");
+        }
 
-          pSwapChain.p->AddRef ();
-          pSwapChain = pNativeSwapChain;
+        if (SK_slGetNativeInterface (pDevice.p, (void **)&pNativeDevice.p) == sl::Result::eOk)
+        {   _ExchangeProxyForNative (pDevice,             pNativeDevice);
+          SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd D3D11 Device...");
+        }
 
-          if (SK_slGetNativeInterface (pFactory.p, (void **)&pNativeFactory.p) == sl::Result::eOk)
-          {
-            SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd DXGI Factory...");
-
-            pFactory.p->AddRef ();
-            pFactory = pNativeFactory;
-          }
-
-          if (SK_slGetNativeInterface (pDevice.p, (void **)&pNativeDevice.p) == sl::Result::eOk)
-          {
-            SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd D3D11 Device...");
-
-            pDevice.p->AddRef ();
-            pDevice = pNativeDevice;
-          }
-
-          if (SK_slGetNativeInterface (pImmediateContext.p, (void **)&pNativeImmediateContext.p) == sl::Result::eOk)
-          {
-            SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd D3D11 Immediate Context...");
-
-            pImmediateContext.p->AddRef ();
-            pImmediateContext = pNativeImmediateContext;
-          }
+        if (SK_slGetNativeInterface (pImmediateContext.p, (void **)&pNativeImmediateContext.p) == sl::Result::eOk)
+        {   _ExchangeProxyForNative (pImmediateContext,             pNativeImmediateContext);
+          SK_LOGi0 (L"Got Native Interface for Streamline Proxy'd D3D11 Immediate Context...");
         }
       }
 
@@ -9476,24 +10128,15 @@ HookDXGI (LPVOID user)
       if (SUCCEEDED (hr))
       {
         if (SK_slGetNativeInterface (pFactory, (void **)&pNativeFactory.p) == sl::Result::eOk)
-                                     pFactory =          pNativeFactory;
+            _ExchangeProxyForNative (pFactory,           pNativeFactory);
 
         if (SK_slGetNativeInterface (pDevice.p, (void **)&pNativeDevice.p) == sl::Result::eOk)
-                                     pDevice =            pNativeDevice;
+            _ExchangeProxyForNative (pDevice,             pNativeDevice);
 
         if (SK_slGetNativeInterface (pImmediateContext.p, (void **)&pNativeImmediateContext.p) == sl::Result::eOk)
-                                     pImmediateContext =            pNativeImmediateContext;
+            _ExchangeProxyForNative (pImmediateContext,             pNativeImmediateContext);
 
-        // Stupid Nixxes hack, no other implementation of Streamline requires this check
-        if (SK_IsInjected () && SK_IsModuleLoaded (L"sl.dlss_g.dll") && (SK_Inject_GetInjectionDelayInSeconds () == 0.0f))
-        {
-          SK_NGX_DLSSG_LateInject = true;
-        }
-
-        else
-        {
-          SK_DXGI_SafeCreateSwapChain (pFactory, pDevice.p, &desc, &pSwapChain.p);
-        }
+        SK_DXGI_SafeCreateSwapChain (pFactory, pDevice.p, &desc, &pSwapChain.p);
 
         sk_hook_d3d11_t d3d11_hook_ctx =
           { &pDevice.p, &pImmediateContext.p };
@@ -9509,6 +10152,11 @@ HookDXGI (LPVOID user)
     {
       if (pSwapChain != nullptr)
       {
+        if (SK_slGetNativeInterface (pSwapChain.p, (void **)&pNativeSwapChain.p) == sl::Result::eOk) {
+                                     pSwapChain.p->AddRef (); // Leak the SwapChain to avoid crashes in Nixxes games
+            _ExchangeProxyForNative (pSwapChain,             pNativeSwapChain);
+        }
+
         SK_DXGI_HookSwapChain (pSwapChain);
       }
 
@@ -9902,6 +10550,8 @@ static constexpr uint32_t
   BUDGET_POLL_INTERVAL = 133UL; // How often to sample the budget
                                 //  in msecs
 
+HANDLE __SK_DXGI_BudgetChangeEvent = INVALID_HANDLE_VALUE;
+
 DWORD
 WINAPI
 SK::DXGI::BudgetThread ( LPVOID user_data )
@@ -9932,6 +10582,8 @@ SK::DXGI::BudgetThread ( LPVOID user_data )
 
     if ( params->event == nullptr )
       break;
+
+    __SK_DXGI_BudgetChangeEvent = params->event;
 
     HANDLE phEvents [] = {
       params->event, params->shutdown,
@@ -10445,6 +11097,8 @@ SK_D3D11_QuickHooked (void);
 void
 SK_DXGI_QuickHook (void)
 {
+  SK_COMPAT_CheckStreamlineSupport ();
+
   // We don't want to hook this, and we certainly don't want to hook it using
   //   cached addresses!
   if (! (config.apis.dxgi.d3d11.hook ||
@@ -10470,7 +11124,7 @@ SK_DXGI_QuickHook (void)
     __SK_DisableQuickHook = TRUE;
   }
 
-  if ( SK_IsModuleLoaded (L"sl.dlss_g.dll") )
+  if ( SK_IsModuleLoaded (L"sl.interposer.dll") )
   {
     SK_LOGi0 (L" # DXGI QuickHook disabled because an NVIDIA Streamline Interposer is present...");
 

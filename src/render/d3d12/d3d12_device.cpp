@@ -53,6 +53,8 @@ D3D12Device_CreateUnorderedAccessView_pfn
 D3D12Device_CreateUnorderedAccessView_Original   = nullptr;
 D3D12Device_CreateRenderTargetView_pfn
 D3D12Device_CreateRenderTargetView_Original      = nullptr;
+D3D12Device_CreateSampler_pfn
+D3D12Device_CreateSampler_Original               = nullptr;
 D3D12Device_GetResourceAllocationInfo_pfn
 D3D12Device_GetResourceAllocationInfo_Original   = nullptr;
 D3D12Device_CreateCommittedResource_pfn
@@ -71,6 +73,12 @@ D3D12Device4_CreateCommittedResource1_Original   = nullptr;
 
 D3D12Device8_CreateCommittedResource2_pfn
 D3D12Device8_CreateCommittedResource2_Original   = nullptr;
+
+// This is pretty new, and we don't need it... allow builds to skip it
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+D3D12Device11_CreateSampler2_pfn
+D3D12Device11_CreateSampler2_Original            = nullptr;
+#endif
 
 concurrency::concurrent_unordered_set <ID3D12PipelineState*> _criticalVertexShaders;
 concurrency::concurrent_unordered_map <ID3D12PipelineState*, bool> _vertexShaders;
@@ -302,6 +310,11 @@ _In_   const D3D12_GRAPHICS_PIPELINE_STATE_DESC *pDesc_,
              REFIID                              riid,
 _COM_Outptr_ void                              **ppPipelineState )
 {
+  if (ppPipelineState == nullptr)
+    return E_INVALIDARG;
+
+  *ppPipelineState = nullptr;
+
   if (riid != __uuidof (ID3D12PipelineState) || ppPipelineState == nullptr)
   {
     wchar_t                wszGUID [41] = { };
@@ -446,8 +459,9 @@ _COM_Outptr_ void                              **ppPipelineState )
   {
     // Do not enable in other games for now, needs more testing
     //
-    static bool bEldenRing =
-      (SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
+    static const bool bEldenRing =
+    //(SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
+      false;
 
     if (bEldenRing || config.render.dxgi.allow_d3d12_footguns)
     {
@@ -734,8 +748,10 @@ struct SK_D3D12_PipelineParser : ID3DX12PipelineParserCallbacks
                                       DxilContainerHashSize,
                                                  pHash );
 
-          static bool bEldenRing =
-            (SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
+          static const bool bEldenRing =
+          //(SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
+            false;
+
           // Do not enable in other games for now, needs more testing
           //
           if (bEldenRing || config.render.dxgi.allow_d3d12_footguns)
@@ -801,14 +817,18 @@ _COM_Outptr_  void                            **ppPipelineState )
 {
   SK_LOG_FIRST_CALL
 
+  if (ppPipelineState == nullptr)
+    return E_INVALIDARG;
+
   HRESULT hr =
     D3D12Device2_CreatePipelineState_Original (
            This, pDesc, riid, ppPipelineState );
 
   // Do not enable in other games for now, needs more testing
   //
-  static bool bEldenRing =
-    (SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
+  static const bool bEldenRing =
+  //(SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
+    false;
 
   if (bEldenRing || config.render.dxgi.allow_d3d12_footguns)
   {
@@ -897,114 +917,119 @@ D3D12Device_CreateCommandAllocator_Detour (
   REFIID                   riid,
   _COM_Outptr_  void      **ppCommandAllocator )
 {
-  static bool bEldenRing =
-    (SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
-  if (bEldenRing)
-  {
-  if (riid == __uuidof (ID3D12CommandAllocator))
-  {
-    struct allocator_cache_s {
-      using heap_type_t =
-        concurrency::concurrent_unordered_map <ID3D12Device*,
-        concurrency::concurrent_unordered_map <ID3D12CommandAllocator*, volatile ULONG64>>;
+  if (ppCommandAllocator != nullptr)
+  {  *ppCommandAllocator  = nullptr;
 
-      const char* type   = "Unknown";
-      heap_type_t heap   = heap_type_t ();
-      int         cycles = 0;
-    } static
-      direct_ { .type = "Direct" }, bundle_  { .type = "Bundle"  },
-      copy_   { .type = "Copy"   }, compute_ { .type = "Compute" };
+#if 0
+    static const bool bEldenRing =
+    //(SK_GetCurrentGameID () == SK_GAME_ID::EldenRing);
+      false;
 
-    allocator_cache_s*
-             pCache = nullptr;
-
-    switch (type)
+    if (bEldenRing && riid == __uuidof (ID3D12CommandAllocator))
     {
-      case D3D12_COMMAND_LIST_TYPE_DIRECT:  pCache = &direct_;  break;
-      case D3D12_COMMAND_LIST_TYPE_BUNDLE:  pCache = &bundle_;  break;
-      case D3D12_COMMAND_LIST_TYPE_COPY:    pCache = &copy_;    break;
-      case D3D12_COMMAND_LIST_TYPE_COMPUTE: pCache = &compute_; break;
-      default:
-        break;
-    }
+      struct allocator_cache_s {
+        using heap_type_t =
+          concurrency::concurrent_unordered_map <ID3D12Device*,
+          concurrency::concurrent_unordered_map <ID3D12CommandAllocator*, volatile ULONG64>>;
 
-    if (pCache != nullptr)
-    {
-      int extra = 0;
+        const char* type   = "Unknown";
+        heap_type_t heap   = heap_type_t ();
+        int         cycles = 0;
+      } static
+        direct_ { .type = "Direct" }, bundle_  { .type = "Bundle"  },
+        copy_   { .type = "Copy"   }, compute_ { .type = "Compute" };
 
-      for ( auto &[pAllocator, LastFrame] : pCache->heap [This] )
+      allocator_cache_s*
+               pCache = nullptr;
+
+      switch (type)
       {
-        if (pAllocator != nullptr && ReadULong64Acquire (&LastFrame) != 0)
+        case D3D12_COMMAND_LIST_TYPE_DIRECT:  pCache = &direct_;  break;
+        case D3D12_COMMAND_LIST_TYPE_BUNDLE:  pCache = &bundle_;  break;
+        case D3D12_COMMAND_LIST_TYPE_COPY:    pCache = &copy_;    break;
+        case D3D12_COMMAND_LIST_TYPE_COMPUTE: pCache = &compute_; break;
+        default:
+          break;
+      }
+
+      if (pCache != nullptr)
+      {
+        int extra = 0;
+
+        for ( auto &[pAllocator, LastFrame] : pCache->heap [This] )
         {
-          if (pAllocator->AddRef () == 2)
+          if (pAllocator != nullptr && ReadULong64Acquire (&LastFrame) != 0)
           {
-            if (extra++ == 0)
+            if (pAllocator->AddRef () == 2)
             {
-              *ppCommandAllocator =
-                       pAllocator;
-                       pAllocator->Reset ();
-
-              SK_LOG1 ( ( L"%hs Command Allocator Reused", pCache->type ),
-                            __SK_SUBSYSTEM__ );
-
-              SK_LOG1 ( ( L"Allocator Heap Size: %d", pCache->heap [This].size ()),
-                            __SK_SUBSYSTEM__ );
-            }
-
-            // We found a cached allocator, but let's continue looking for any
-            // dead allocators to free.
-            else
-            {
-              // There are an insane number (200+) of live Direct Cmd Allocators
-              //   in Elden Ring
-              if (pAllocator->Release () == 1 && extra > 256)
+              if (extra++ == 0)
               {
-                // Hopefully this is not still live...
-                pAllocator->SetName (
-                  SK_FormatStringW ( L"Zombie %hs Allocator (%d)",
-                                       pCache->type, pCache->cycles ).c_str ()
-                                    );
+                *ppCommandAllocator =
+                         pAllocator;
+                         pAllocator->Reset ();
 
-                WriteULong64Release (&LastFrame, 0); // Dead
+                SK_LOG1 ( ( L"%hs Command Allocator Reused", pCache->type ),
+                              __SK_SUBSYSTEM__ );
 
-                pAllocator->Release ();
+                SK_LOG1 ( ( L"Allocator Heap Size: %d", pCache->heap [This].size ()),
+                              __SK_SUBSYSTEM__ );
+              }
 
-                SK_LOG1 ( ( L"%hs Command Allocator Released (%p)", pCache->type,
-                                                                    pAllocator ),
-                            __SK_SUBSYSTEM__ );
+              // We found a cached allocator, but let's continue looking for any
+              // dead allocators to free.
+              else
+              {
+                // There are an insane number (200+) of live Direct Cmd Allocators
+                //   in Elden Ring
+                if (pAllocator->Release () == 1 && extra > 256)
+                {
+                  // Hopefully this is not still live...
+                  pAllocator->SetName (
+                    SK_FormatStringW ( L"Zombie %hs Allocator (%d)",
+                                         pCache->type, pCache->cycles ).c_str ()
+                                      );
+
+                  WriteULong64Release (&LastFrame, 0); // Dead
+
+                  pAllocator->Release ();
+
+                  SK_LOG1 ( ( L"%hs Command Allocator Released (%p)", pCache->type,
+                                                                      pAllocator ),
+                              __SK_SUBSYSTEM__ );
+                }
               }
             }
-          }
 
-          else
-          {
-            ++pCache->cycles;
+            else
+            {
+              ++pCache->cycles;
 
-            pAllocator->Release ();
+              pAllocator->Release ();
+            }
           }
         }
-      }
 
-      if (extra > 0) // Cache hit
-        return S_OK;
+        if (extra > 0) // Cache hit
+          return S_OK;
 
-      if ( SUCCEEDED (
-             D3D12Device_CreateCommandAllocator_Original (
-               This, type,
-               riid, ppCommandAllocator
-             )       )
-         )
-      {
-        (*(ID3D12CommandAllocator **)ppCommandAllocator)->AddRef ();
+        if ( SUCCEEDED (
+               D3D12Device_CreateCommandAllocator_Original (
+                 This, type,
+                 riid, ppCommandAllocator
+               )       )
+           )
+        {
+          (*(ID3D12CommandAllocator **)ppCommandAllocator)->AddRef ();
 
-        pCache->heap [This].insert (
-          std::make_pair ( *(ID3D12CommandAllocator **)ppCommandAllocator,
-                               SK_GetFramesDrawn () + 1 ) );
+          pCache->heap [This].insert (
+            std::make_pair ( *(ID3D12CommandAllocator **)ppCommandAllocator,
+                                 SK_GetFramesDrawn () + 1 ) );
 
-        return S_OK;
+          return S_OK;
+        }
       }
     }
-  }
+#endif
   }
 
   return
@@ -1259,6 +1284,229 @@ _In_            D3D12_CPU_DESCRIPTOR_HANDLE       DestDescriptor )
     );
 }
 
+void
+STDMETHODCALLTYPE
+D3D12Device_CreateSampler_Detour (
+            ID3D12Device          *This,
+_In_  const D3D12_SAMPLER_DESC    *pDesc,
+_In_  D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+  SK_LOG_FIRST_CALL
+
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+  D3D12_FEATURE_DATA_D3D12_OPTIONS19
+      opt19 ={.AnisoFilterWithPointMipSupported=0xF};
+  if (opt19.AnisoFilterWithPointMipSupported == 0xF)
+  {
+    if (FAILED (This->CheckFeatureSupport (
+      D3D12_FEATURE_D3D12_OPTIONS19, &opt19, sizeof (opt19)
+       )       )                          )
+    {
+      opt19.AnisoFilterWithPointMipSupported = FALSE;
+    }
+  }
+#endif
+
+  BOOL AnisoFilterWithPointMipSupported =
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+    opt19.AnisoFilterWithPointMipSupported;
+#else
+    FALSE;
+
+  std::ignore = AnisoFilterWithPointMipSupported;
+#endif
+
+  D3D12_SAMPLER_DESC desc =
+    (pDesc != nullptr) ?
+    *pDesc             : D3D12_SAMPLER_DESC {};
+
+  if (config.render.d3d12.force_lod_bias != 0.0f)
+  {
+    if (desc.MinLOD != desc.MaxLOD && (desc.ComparisonFunc == D3D12_COMPARISON_FUNC_ALWAYS||
+                                       desc.ComparisonFunc == 0||
+                                       desc.ComparisonFunc == D3D12_COMPARISON_FUNC_NEVER))
+    {
+      desc.MipLODBias =
+        config.render.d3d12.force_lod_bias;
+    }
+  }
+
+  if (config.render.d3d12.force_anisotropic)
+  {
+    switch (desc.Filter)
+    {
+      case D3D12_FILTER_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_MINIMUM_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+        break;
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+      case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_COMPARISON_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_MINIMUM_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+        break;
+#else
+      case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = D3D12_FILTER_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = D3D12_FILTER_MINIMUM_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+#endif
+      default:
+        break;
+    }
+  }
+
+  switch (desc.Filter)
+  {
+    case D3D12_FILTER_ANISOTROPIC:
+    case D3D12_FILTER_COMPARISON_ANISOTROPIC:
+    case D3D12_FILTER_MINIMUM_ANISOTROPIC:
+    case D3D12_FILTER_MAXIMUM_ANISOTROPIC:
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+    case D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT:
+    case D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT:
+    case D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+    case D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+#endif
+      if (config.render.d3d12.max_anisotropy > 0)
+        desc.MaxAnisotropy = (UINT)config.render.d3d12.max_anisotropy;
+      break;
+    default:
+      break;
+  }
+
+  return
+    D3D12Device_CreateSampler_Original (This, (pDesc == nullptr) ?
+                                                        nullptr : &desc, DestDescriptor);
+}
+
+// This is pretty new, and we don't need it... allow builds to skip it
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+void
+STDMETHODCALLTYPE
+D3D12Device11_CreateSampler2_Detour (
+            ID3D12Device11        *This,
+_In_  const D3D12_SAMPLER_DESC2   *pDesc,
+_In_  D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
+{
+  SK_LOG_FIRST_CALL
+
+  D3D12_FEATURE_DATA_D3D12_OPTIONS19
+      opt19 ={.AnisoFilterWithPointMipSupported=0xF};
+  if (opt19.AnisoFilterWithPointMipSupported == 0xF)
+  {
+    if (FAILED (This->CheckFeatureSupport (
+      D3D12_FEATURE_D3D12_OPTIONS19, &opt19, sizeof (opt19)
+       )       )                          )
+    {
+      opt19.AnisoFilterWithPointMipSupported = FALSE;
+    }
+  }
+
+  BOOL AnisoFilterWithPointMipSupported =
+    opt19.AnisoFilterWithPointMipSupported;
+
+  D3D12_SAMPLER_DESC2 desc =
+    (pDesc != nullptr) ?
+    *pDesc             : D3D12_SAMPLER_DESC2 {};
+
+  if (config.render.d3d12.force_lod_bias != 0.0f)
+  {
+    if (desc.MinLOD != desc.MaxLOD && (desc.ComparisonFunc == D3D12_COMPARISON_FUNC_ALWAYS||
+                                       desc.ComparisonFunc == 0||
+                                       desc.ComparisonFunc == D3D12_COMPARISON_FUNC_NEVER))
+    {
+      desc.MipLODBias =
+        config.render.d3d12.force_lod_bias;
+    }
+  }
+
+  if (config.render.d3d12.force_anisotropic)
+  {
+    switch (desc.Filter)
+    {
+      case D3D12_FILTER_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_MINIMUM_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR:
+        desc.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_COMPARISON_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_MINIMUM_ANISOTROPIC;
+        break;
+      case D3D12_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+        desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                       : D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+        break;
+      default:
+        break;
+    }
+  }
+
+  switch (desc.Filter)
+  {
+    case D3D12_FILTER_ANISOTROPIC:
+    case D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT:
+    case D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT:
+    case D3D12_FILTER_COMPARISON_ANISOTROPIC:
+    case D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+    case D3D12_FILTER_MINIMUM_ANISOTROPIC:
+    case D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+    case D3D12_FILTER_MAXIMUM_ANISOTROPIC:
+      if (config.render.d3d12.max_anisotropy > 0)
+        desc.MaxAnisotropy = (UINT)config.render.d3d12.max_anisotropy;
+      break;
+    default:
+      break;
+  }
+
+  return
+    D3D12Device11_CreateSampler2_Original (This, (pDesc == nullptr) ?
+                                                           nullptr : &desc, DestDescriptor);
+}
+#endif
+
 D3D12_RESOURCE_ALLOCATION_INFO
 STDMETHODCALLTYPE
 D3D12Device_GetResourceAllocationInfo_Detour (
@@ -1334,6 +1582,32 @@ SK_ITrackD3D12Resource final : IUnknown
       _d3d12_rbk->_pCommandQueue;
   }
 
+  SK_ITrackD3D12Resource ( ID3D12Device   *pDevice,
+                           ID3D12Resource *pResource,
+                           INT             iBufferIdx,
+                           ID3D12Fence    *pFence_,
+                           const wchar_t  *wszName,
+                  volatile UINT64         */*puiFenceValue_*/) :
+                                   pReal  (pResource),
+                                   pDev   (pDevice),
+                                   pFence (pFence_),
+                                   name_  (wszName != nullptr ? wszName
+                                                             : L"Unnamed"),
+                                   ver_   (0)
+  {
+    pResource->SetPrivateDataInterface (
+      IID_ITrackD3D12Resource, this
+    );
+
+    NextFrame =
+      SK_GetFramesDrawn ();// + _d3d12_rbk->frames_.size ();
+
+    pCmdQueue =
+      _d3d12_rbk->_pCommandQueue;
+
+    this->iBufferIdx = iBufferIdx;
+  }
+
   virtual ~SK_ITrackD3D12Resource (void)
   {
   }
@@ -1354,9 +1628,42 @@ SK_ITrackD3D12Resource final : IUnknown
   SK_ComPtr <ID3D12Device>       pDev;
   SK_ComPtr <ID3D12CommandQueue> pCmdQueue;
   SK_ComPtr <ID3D12Fence>        pFence;
-  UINT64                         uiFence   = 0;
-  UINT64                         NextFrame = 0;
+  UINT64                         uiFence    = 0;
+  UINT64                         NextFrame  = 0;
+  UINT                           iBufferIdx = 0;
 };
+
+void
+SK_D3D12_TrackResource (ID3D12Device *pDevice, ID3D12Resource *pResource, UINT iBufferIdx)
+{
+  new (std::nothrow) SK_ITrackD3D12Resource ( pDevice, pResource, iBufferIdx,
+                                                        nullptr, nullptr, nullptr );
+}
+
+bool
+SK_D3D12_IsTrackedResource (ID3D12Resource *pResource)
+{
+  SK_ComPtr <SK_ITrackD3D12Resource> pTrackedResource;
+  UINT size = sizeof (void *);
+  
+  return
+    SUCCEEDED (pResource->GetPrivateData (IID_ITrackD3D12Resource, &size, (void **)&pTrackedResource.p));
+}
+
+bool
+SK_D3D12_IsBackBufferOnActiveQueue (ID3D12Resource *pResource, ID3D12CommandQueue *pCmdQueue, UINT iBufferIdx)
+{
+  SK_ComPtr <SK_ITrackD3D12Resource> pTrackedResource;
+  UINT size = sizeof (void *);
+  
+  if (SUCCEEDED (pResource->GetPrivateData (IID_ITrackD3D12Resource, &size, (void **)&pTrackedResource.p)))
+  {
+    if (pCmdQueue == pTrackedResource.p->pCmdQueue && pTrackedResource.p->iBufferIdx == iBufferIdx)
+      return true;
+  }
+
+  return false;
+}
 
 HRESULT
 STDMETHODCALLTYPE
@@ -2055,6 +2362,9 @@ _In_       const D3D12_HEAP_DESC *pDesc,
                  REFIID           riid,
 _COM_Outptr_opt_ void           **ppvHeap)
 {
+  if (ppvHeap != nullptr)
+     *ppvHeap  = nullptr;
+
   return
     D3D12Device_CreateHeap_Original (This, pDesc, riid, ppvHeap);
 }
@@ -2071,6 +2381,9 @@ _In_opt_   const D3D12_CLEAR_VALUE      *pOptimizedClearValue,
                  REFIID                  riidResource,
 _COM_Outptr_opt_ void                  **ppvResource )
 {
+  if (ppvResource != nullptr)
+     *ppvResource  = nullptr;
+
   if (pDesc != nullptr) // Not optional, but some games try it anyway :)
   {
 #if 0
@@ -2195,6 +2508,9 @@ _In_opt_   const D3D12_CLEAR_VALUE      *pOptimizedClearValue,
                  REFIID                  riid,
 _COM_Outptr_opt_ void                  **ppvResource )
 {
+  if (ppvResource != nullptr)
+     *ppvResource  = nullptr;
+
   return
     D3D12Device_CreatePlacedResource_Original ( This,
       pHeap, HeapOffset, pDesc, InitialState,
@@ -2245,6 +2561,35 @@ D3D12Device_CheckFeatureSupport_Detour (
 
 }
 
+
+D3D12Device9_CreateShaderCacheSession_pfn D3D12Device9_CreateShaderCacheSession_Original = nullptr;
+D3D12Device9_ShaderCacheControl_pfn       D3D12Device9_ShaderCacheControl_Original       = nullptr;
+
+HRESULT
+STDMETHODCALLTYPE
+D3D12Device9_CreateShaderCacheSession_Detour (      ID3D12Device9                   *This,
+                                              const D3D12_SHADER_CACHE_SESSION_DESC *pDesc,
+                                                    REFIID                           riid,
+                                                    void                           **ppvSession)
+{
+  SK_LOG_FIRST_CALL
+
+  return
+    D3D12Device9_CreateShaderCacheSession_Original (This, pDesc, riid, ppvSession);
+}
+
+HRESULT
+STDMETHODCALLTYPE
+D3D12Device9_ShaderCacheControl_Detour ( ID3D12Device9                    *This,
+                                         D3D12_SHADER_CACHE_KIND_FLAGS     Kinds,
+                                         D3D12_SHADER_CACHE_CONTROL_FLAGS  Control )
+{
+  SK_LOG_FIRST_CALL
+
+  return
+    D3D12Device9_ShaderCacheControl_Original (This, Kinds, Control);
+}
+
 void
 _InstallDeviceHooksImpl (ID3D12Device* pDevice12)
 {
@@ -2253,7 +2598,7 @@ _InstallDeviceHooksImpl (ID3D12Device* pDevice12)
     return;
 
   const bool bHasStreamline =
-    SK_IsModuleLoaded (L"sl.dlss_g.dll");
+    SK_IsModuleLoaded (L"sl.interposer.dll");
 
   SK_ComPtr <ID3D12Device> pDev12;
 
@@ -2298,6 +2643,11 @@ _InstallDeviceHooksImpl (ID3D12Device* pDevice12)
                            *(void ***)*(&pDev12), 20,
                             D3D12Device_CreateRenderTargetView_Detour,
                   (void **)&D3D12Device_CreateRenderTargetView_Original );
+
+  SK_CreateVFTableHook2 ( L"ID3D12Device::CreateSampler",
+                           *(void ***)*(&pDev12), 22,
+                            D3D12Device_CreateSampler_Detour,
+                  (void **)&D3D12Device_CreateSampler_Original );
 
   ////
   // Hooking this causes crashes, it needs to be wrapped...
@@ -2424,6 +2774,18 @@ _InstallDeviceHooksImpl (ID3D12Device* pDevice12)
   //---------------
   // 65 SetBackgroundProcessingMode
 
+  SK_ComQIPtr <ID3D12Device6>
+      pDevice6 (pDev12);
+  if (pDevice6.p != nullptr)
+  {
+    if (config.render.dxgi.allow_d3d12_footguns)
+    {
+      pDevice6->SetBackgroundProcessingMode ( D3D12_BACKGROUND_PROCESSING_MODE_ALLOW_INTRUSIVE_MEASUREMENTS,
+                                              D3D12_MEASUREMENTS_ACTION_KEEP_ALL,
+                                              nullptr, nullptr );
+    }
+  }
+
   // ID3D12Device7
   //---------------
   // 66 AddToStateObject
@@ -2453,6 +2815,43 @@ _InstallDeviceHooksImpl (ID3D12Device* pDevice12)
   // 74 ShaderCacheControl
   // 75 CreateCommandQueue1
 
+  SK_ComQIPtr <ID3D12Device9>
+      pDevice9 (pDev12);
+  if (pDevice9.p != nullptr)
+  {
+    SK_CreateVFTableHook2 ( L"ID3D12Device9::CreateShaderCacheSession",
+                           *(void ***)*(&pDevice9), 73,
+                            D3D12Device9_CreateShaderCacheSession_Detour,
+                  (void **)&D3D12Device9_CreateShaderCacheSession_Original );
+
+    SK_CreateVFTableHook2 ( L"ID3D12Device9::ShaderCacheControl",
+                           *(void ***)*(&pDevice9), 74,
+                            D3D12Device9_ShaderCacheControl_Detour,
+                  (void **)&D3D12Device9_ShaderCacheControl_Original );
+  }
+
+  // ID3D12Device10
+  //---------------
+  // 76 CreateCommittedResource3
+  // 77 CreatePlacedResource2
+  // 78 CreateReservedResource2
+
+  // ID3D12Device11
+  //---------------
+  // 79 CreateSampler2
+
+// This is pretty new, and we don't need it... allow builds to skip it
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+  SK_ComQIPtr <ID3D12Device11>
+      pDevice11 (pDev12);
+  if (pDevice11.p != nullptr)
+  {
+    SK_CreateVFTableHook2 ( L"ID3D12Device11::CreateSampler2",
+                             *(void ***)*(&pDevice11.p), 79,
+                              D3D12Device11_CreateSampler2_Detour,
+                    (void **)&D3D12Device11_CreateSampler2_Original );
+  }
+#endif
 
   //
   // Extra hooks are needed to handle SwapChain backbuffer copies between
@@ -2481,10 +2880,24 @@ _InstallDeviceHooksImpl (ID3D12Device* pDevice12)
     }
   }
 }
-void
+bool
 SK_D3D12_InstallDeviceHooks (ID3D12Device *pDev12)
 {
-  SK_RunOnce (_InstallDeviceHooksImpl (pDev12));
+  static bool s_Init = false;
+
+  // Check the status of hooks
+  if (pDev12 == nullptr)
+    return s_Init;
+
+  // Actually install hooks... once.
+  if (! std::exchange (s_Init, true))
+  {
+    _InstallDeviceHooksImpl (pDev12);
+
+    return true;
+  }
+
+  return false;
 }
 
 D3D12CreateDevice_pfn D3D12CreateDevice_Import = nullptr;
@@ -2549,13 +2962,336 @@ D3D12CreateDevice_Detour (
                    );
     }
 
-    SK_RunOnce ({
-      SK_D3D12_InstallDeviceHooks       (*(ID3D12Device **)ppDevice);
-      SK_D3D12_InstallCommandQueueHooks (*(ID3D12Device **)ppDevice);
-    });
+    bool new_hooks = false;
+
+    new_hooks |= SK_D3D12_InstallDeviceHooks       (*(ID3D12Device **)ppDevice);
+    new_hooks |= SK_D3D12_InstallCommandQueueHooks (*(ID3D12Device **)ppDevice);
+
+    if (new_hooks)
+      SK_ApplyQueuedHooks ();
   }
 
   return res;
+}
+
+static PFN_D3D12_SERIALIZE_ROOT_SIGNATURE
+       D3D12SerializeRootSignature_Original = nullptr;
+
+static PFN_D3D12_SERIALIZE_VERSIONED_ROOT_SIGNATURE
+       D3D12SerializeVersionedRootSignature_Original = nullptr;
+
+HRESULT
+WINAPI
+D3D12SerializeVersionedRootSignature_Detour (
+  _In_      const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *pRootSignature,
+  _Out_           ID3DBlob                           **ppBlob,
+  _Out_opt_       ID3DBlob                           **ppErrorBlob )
+{
+  SK_LOG_FIRST_CALL
+
+  if (pRootSignature != nullptr)
+  switch (pRootSignature->Version)
+  {
+    case D3D_ROOT_SIGNATURE_VERSION_1_0:
+    case D3D_ROOT_SIGNATURE_VERSION_1_1:
+    {
+      {
+#if 0
+//#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+        D3D12_FEATURE_DATA_D3D12_OPTIONS19
+            opt19 ={.AnisoFilterWithPointMipSupported=0xF};
+        if (opt19.AnisoFilterWithPointMipSupported == 0xF)
+        {
+          if (FAILED (This->CheckFeatureSupport (
+            D3D12_FEATURE_D3D12_OPTIONS19, &opt19, sizeof (opt19)
+             )       )                          )
+          {
+            opt19.AnisoFilterWithPointMipSupported = FALSE;
+          }
+        }
+#endif
+
+        BOOL AnisoFilterWithPointMipSupported =
+//#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+#if 0
+        opt19.AnisoFilterWithPointMipSupported;
+#else
+        FALSE;
+        std::ignore = AnisoFilterWithPointMipSupported;
+#endif
+
+        D3D12_ROOT_SIGNATURE_DESC
+          RootSigCopy;        
+          RootSigCopy.NumParameters     = pRootSignature->Desc_1_0.NumParameters;
+          RootSigCopy.pParameters       = pRootSignature->Desc_1_0.pParameters;
+          RootSigCopy.NumStaticSamplers = pRootSignature->Desc_1_0.NumStaticSamplers;
+          RootSigCopy.pStaticSamplers   = pRootSignature->Desc_1_0.pStaticSamplers;
+          RootSigCopy.Flags             = pRootSignature->Desc_1_0.Flags;
+
+        for ( UINT idx = 0U                                         ;
+                   idx < pRootSignature->Desc_1_0.NumStaticSamplers ;
+                   idx++ )
+        {
+          D3D12_STATIC_SAMPLER_DESC& static_desc =
+            (D3D12_STATIC_SAMPLER_DESC &)RootSigCopy.pStaticSamplers [idx];
+
+          if (config.render.d3d12.force_lod_bias != 0.0f)
+          {
+            if (static_desc.MinLOD != static_desc.MaxLOD && (static_desc.ComparisonFunc == D3D12_COMPARISON_FUNC_ALWAYS||
+                                                             static_desc.ComparisonFunc == 0||
+                                                             static_desc.ComparisonFunc == D3D12_COMPARISON_FUNC_NEVER))
+            {
+              SK_LOGi1 (L"Overriding Mip LOD Bias on Static Sampler...");
+
+              static_desc.MipLODBias =
+                config.render.d3d12.force_lod_bias;
+            }
+          }
+
+          if (config.render.d3d12.force_anisotropic)
+          {
+            switch (static_desc.Filter)
+            {
+              case D3D12_FILTER_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_MINIMUM_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+                break;
+#if 0
+//#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+              case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_COMPARISON_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_MINIMUM_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+#else
+              case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_MINIMUM_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+#endif
+                break;
+              default:
+                break;
+            }
+          }
+
+          switch (static_desc.Filter)
+          {
+            case D3D12_FILTER_ANISOTROPIC:
+            case D3D12_FILTER_COMPARISON_ANISOTROPIC:
+            case D3D12_FILTER_MINIMUM_ANISOTROPIC:
+            case D3D12_FILTER_MAXIMUM_ANISOTROPIC:
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+            case D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT:
+            case D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT:
+            case D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+            case D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+#endif
+              if (config.render.d3d12.max_anisotropy > 0)
+              {
+                SK_LOGi1 (L"Overriding Max Anisotropy on Static Sampler...");
+                static_desc.MaxAnisotropy = (UINT)config.render.d3d12.max_anisotropy;
+              }
+              break;
+            default:
+              break;
+          }
+        }
+      }
+      break;
+
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+      case D3D_ROOT_SIGNATURE_VERSION_1_2:
+        SK_LOGi0 (L"Cannot Override Root Signature 1.2...");
+      break;
+#endif
+    } break;
+  }
+
+  return
+    D3D12SerializeVersionedRootSignature_Original (pRootSignature, ppBlob, ppErrorBlob);
+}
+
+HRESULT
+WINAPI
+D3D12SerializeRootSignature_Detour ( const D3D12_ROOT_SIGNATURE_DESC* pRootSignature,
+                                           D3D_ROOT_SIGNATURE_VERSION Version,
+                                           ID3DBlob**                 ppBlob,
+                                           ID3DBlob**                 ppErrorBlob )
+{
+  SK_LOG_FIRST_CALL
+
+  switch (Version)
+  {
+    case D3D_ROOT_SIGNATURE_VERSION_1_0:
+    case D3D_ROOT_SIGNATURE_VERSION_1_1:
+    {
+      if (pRootSignature != nullptr)
+      {
+#if 0
+//#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+        D3D12_FEATURE_DATA_D3D12_OPTIONS19
+            opt19 ={.AnisoFilterWithPointMipSupported=0xF};
+        if (opt19.AnisoFilterWithPointMipSupported == 0xF)
+        {
+          if (FAILED (This->CheckFeatureSupport (
+            D3D12_FEATURE_D3D12_OPTIONS19, &opt19, sizeof (opt19)
+             )       )                          )
+          {
+            opt19.AnisoFilterWithPointMipSupported = FALSE;
+          }
+        }
+#endif
+
+        BOOL AnisoFilterWithPointMipSupported =
+//#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+#if 0
+        opt19.AnisoFilterWithPointMipSupported;
+#else
+        FALSE;
+        std::ignore = AnisoFilterWithPointMipSupported;
+#endif
+
+        D3D12_ROOT_SIGNATURE_DESC
+          RootSigCopy;        
+          RootSigCopy.NumParameters     = pRootSignature->NumParameters;
+          RootSigCopy.pParameters       = pRootSignature->pParameters;
+          RootSigCopy.NumStaticSamplers = pRootSignature->NumStaticSamplers;
+          RootSigCopy.pStaticSamplers   = pRootSignature->pStaticSamplers;
+          RootSigCopy.Flags             = pRootSignature->Flags;
+
+        for ( UINT idx = 0U                                ;
+                   idx < pRootSignature->NumStaticSamplers ;
+                   idx++ )
+        {
+          D3D12_STATIC_SAMPLER_DESC& static_desc =
+            (D3D12_STATIC_SAMPLER_DESC &)RootSigCopy.pStaticSamplers [idx];
+
+          if (config.render.d3d12.force_lod_bias != 0.0f)
+          {
+            if (static_desc.MinLOD != static_desc.MaxLOD && (static_desc.ComparisonFunc == D3D12_COMPARISON_FUNC_ALWAYS||
+                                                             static_desc.ComparisonFunc == 0||
+                                                             static_desc.ComparisonFunc == D3D12_COMPARISON_FUNC_NEVER))
+            {
+              SK_LOGi1 (L"Overriding Mip LOD Bias on Static Sampler...");
+
+              static_desc.MipLODBias =
+                config.render.d3d12.force_lod_bias;
+            }
+          }
+
+          if (config.render.d3d12.force_anisotropic)
+          {
+            switch (static_desc.Filter)
+            {
+              case D3D12_FILTER_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_COMPARISON_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MINIMUM_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_MINIMUM_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MAXIMUM_MIN_MAG_MIP_LINEAR:
+                static_desc.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+                break;
+#if 0
+//#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+              case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_COMPARISON_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_MINIMUM_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = AnisoFilterWithPointMipSupported ? D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT
+                                                                      : D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+#else
+              case D3D12_FILTER_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_COMPARISON_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MINIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_MINIMUM_ANISOTROPIC;
+                break;
+              case D3D12_FILTER_MAXIMUM_MIN_MAG_LINEAR_MIP_POINT:
+                static_desc.Filter = D3D12_FILTER_MAXIMUM_ANISOTROPIC;
+#endif
+                break;
+              default:
+                break;
+            }
+          }
+
+          switch (static_desc.Filter)
+          {
+            case D3D12_FILTER_ANISOTROPIC:
+            case D3D12_FILTER_COMPARISON_ANISOTROPIC:
+            case D3D12_FILTER_MINIMUM_ANISOTROPIC:
+            case D3D12_FILTER_MAXIMUM_ANISOTROPIC:
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+            case D3D12_FILTER_MIN_MAG_ANISOTROPIC_MIP_POINT:
+            case D3D12_FILTER_COMPARISON_MIN_MAG_ANISOTROPIC_MIP_POINT:
+            case D3D12_FILTER_MINIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+            case D3D12_FILTER_MAXIMUM_MIN_MAG_ANISOTROPIC_MIP_POINT:
+#endif
+              if (config.render.d3d12.max_anisotropy > 0)
+              {
+                SK_LOGi1 (L"Overriding Max Anisotropy on Static Sampler...");
+                static_desc.MaxAnisotropy = (UINT)config.render.d3d12.max_anisotropy;
+              }
+              break;
+            default:
+              break;
+          }
+        }
+      }
+      break;
+
+#ifdef __ID3D12Device11_INTERFACE_DEFINED__
+      case D3D_ROOT_SIGNATURE_VERSION_1_2:
+        SK_LOGi0 (L"Cannot Override Root Signature 1.2...");
+      break;
+#endif
+    } break;
+  }
+
+  return
+    D3D12SerializeRootSignature_Original (pRootSignature, Version, ppBlob, ppErrorBlob);
 }
 
 bool
@@ -2573,6 +3309,18 @@ SK_D3D12_HookDeviceCreation (void)
                           &pfnD3D12CreateDevice )
      )
   {
+    SK_CreateDLLHook2 ( L"d3d12.dll",
+                         "D3D12SerializeRootSignature",
+                          D3D12SerializeRootSignature_Detour,
+               (LPVOID *)&D3D12SerializeRootSignature_Original );
+
+    SK_CreateDLLHook2 ( L"d3d12.dll",
+                         "D3D12SerializeVersionedRootSignature",
+                          D3D12SerializeVersionedRootSignature_Detour,
+               (LPVOID *)&D3D12SerializeVersionedRootSignature_Original );
+
+    SK_ApplyQueuedHooks ();
+
     std::exchange (hooked, true);
 
     InterlockedIncrement (&__d3d12_ready);

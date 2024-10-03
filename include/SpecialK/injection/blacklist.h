@@ -100,7 +100,6 @@ static constexpr constexpr_module_s::list_type __graylist = {
 
 static constexpr constexpr_module_s::list_type __blacklist = {
 #ifdef _M_AMD64
-  L"cl.exe",
   L"msbuild.exe",
   L"systemsettings.exe",
   L"systemsettingsbroker.exe",
@@ -165,6 +164,7 @@ static constexpr constexpr_module_s::list_type __blacklist = {
   L"obs32.exe",
 #endif
 
+  L"crash_handler.exe", // Metaphor ReFantazio
   L"postcrashdump.exe",
 
   L"launcher.exe",
@@ -198,20 +198,21 @@ static constexpr constexpr_module_s::list_type __blacklist = {
   L"gta4Browser.exe",          //  (no idea what this is, but ignore it)
   L"rockstarerrorhandler.exe", // 64-bit even in 32-bit games
 
-  L"easteamproxy.exe", // Stupid EA bullcrap
-  L"link2ea.exe",      // More stupid EA stuff
+  L"easteamproxy.exe",         // Stupid EA bullcrap
+  L"link2ea.exe",              // More stupid EA stuff
 
-  L"t2gp.exe",            // 2K Launcher
-  L"launcher_helper.exe", // More 2K crap
+  L"t2gp.exe",                 // 2K Launcher
+  L"launcher_helper.exe",      // More 2K crap
 
-  L"steamless.exe", // Steam DRM workaround needed to mod some games
+  L"steamless.exe",            // Steam DRM workaround needed to mod some games
 
-  L"zfgamebrowser.exe", // Genshin Impact Launcher
-  L"dsx.exe",           // Dual Sense X
+  L"zfgamebrowser.exe",        // Genshin Impact Launcher
+  L"dsx.exe",                  // Dual Sense X
 
-  L"beamng.drive.exe",  // BeamNG's 32-bit launcher
+  L"beamng.drive.exe",         // BeamNG's 32-bit launcher
+  L"losslessscaling.exe",      // Lossless Scaling
 
-  L"setup_redlauncher.exe", // The Witcher 3's Launcher
+  L"setup_redlauncher.exe",    // The Witcher 3's Launcher
 
   L"cefsharp.browsersubprocess.exe", // Baldur's Gate 3
   L"larilauncher.exe",
@@ -275,9 +276,7 @@ static constexpr constexpr_module_s::list_type __blacklist = {
   L"esrv.exe",
   L"ipoint.exe",
   L"itype.exe",
-  L"msedge.exe",
   L"vsgraphics.exe",
-  L"msedgewebview2.exe",
   L"powershell.exe",
   L"devenv.exe",
 
